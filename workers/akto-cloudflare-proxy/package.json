@@ -1,0 +1,18 @@
+{
+  "name": "akto-cloudflare-proxy",
+  "version": "0.0.1",
+  "description": "Cloudflare Worker proxy that mirrors traffic to Akto for API discovery and monitoring",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251109.0",
+    "@types/node": "^24.10.0",
+    "typescript": "^5.5.2",
+    "wrangler": "^4.46.0"
+  }
+}
