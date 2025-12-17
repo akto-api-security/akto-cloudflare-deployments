@@ -13,8 +13,19 @@
 		{
 			"binding": "MCP",
 			"service": "<YOUR_TARGET_WORKER_NAME>"
+		},
+		{
+			"binding": "AKTO_GUARDRAILS",
+			"service": "akto-ingest-guardrails"
+		},
+		{
+			"binding": "AKTO_INGEST_GUARDRAILS",
+			"service": "akto-ingest-guardrails"
 		}
 	],
+	"vars": {
+		"GUARDRAILS_MODE": "async"
+	},
 	"routes": [
 		{
 			"pattern": "*.yourdomain.com/*",
@@ -25,9 +36,12 @@
 	/**
 	 * Configuration Notes:
 	 * 1. Replace <YOUR_TARGET_WORKER_NAME> with the name of your target worker
-	 * 2. The MCP binding is required - this proxies all requests to your target worker
-	 * 3. Update src/index.ts with your Akto data ingestion service URL
-	 * 4. Configure routes above:
+	 * 2. MCP binding: Proxies all requests to your target worker (REQUIRED)
+	 * 3. AKTO_GUARDRAILS binding: For validation in blocked mode (REQUIRED for blocked mode)
+	 * 4. AKTO_INGEST_GUARDRAILS binding: For traffic ingestion (OPTIONAL, can use DATA_INGESTION_URL instead)
+	 * 5. GUARDRAILS_MODE: Set to "async" (validate in background) or "blocked" (validate before forwarding)
+	 * 6. Optional: Add DATA_INGESTION_URL to vars if not using service binding for ingestion
+	 * 7. Configure routes above:
 	 *    - pattern: Route pattern (e.g., "*.yourdomain.com/*", "api.yourdomain.com/*")
 	 *    - zone_name: Your domain name
 	 */

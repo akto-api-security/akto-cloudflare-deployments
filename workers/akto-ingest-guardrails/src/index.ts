@@ -263,4 +263,80 @@ app.post("/api/validate/response", async (c) => {
   return c.json(result);
 });
 
+// Validate request only (for blocked mode - pre-forwarding validation)
+app.post("/api/validate/request-only", async (c) => {
+  const { payload, context } = await c.req.json<{
+    payload: string;
+    context: {
+      ip?: string;
+      endpoint?: string;
+      method?: string;
+      requestHeaders?: Record<string, string>;
+    };
+  }>();
+
+  const dbUrl = c.env.DATABASE_ABSTRACTOR_SERVICE_URL || "https://cyborg.akto.io";
+  const dbToken = c.env.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "";
+
+  const [policies, auditPolicies] = await Promise.all([
+    fetchGuardrailPolicies(dbUrl, dbToken),
+    fetchMcpAuditInfo(dbUrl, dbToken),
+  ]);
+
+  const hasAuditRules = Object.keys(auditPolicies).length > 0;
+  const tbsHost = c.env.THREAT_BACKEND_URL || "https://tbs.akto.io";
+  const tbsToken = c.env.THREAT_BACKEND_TOKEN || "";
+
+  const result = await handleRequestValidation(
+    payload,
+    context,
+    policies,
+    auditPolicies,
+    hasAuditRules,
+    c.env.AKTO_GUARDRAILS_EXECUTOR,
+    tbsHost,
+    tbsToken,
+    c.executionCtx,
+    dbUrl,
+    dbToken,
+    c.env.AKTO_GUARDRAILS_RATE_LIMIT_KV
+  );
+
+  // Build response with explicit blocking decision
+  const response: any = {
+    allowed: result.allowed,
+    shouldBlock: result.shouldBlock ?? !result.allowed,
+    action: result.action ?? (result.allowed ? "ALLOW" : "BLOCK"),
+    reason: result.reason,
+    metadata: result.metadata,
+  };
+
+  // If blocked, include pre-built blocked response
+  if (!result.allowed) {
+    let requestId = null;
+    try {
+      const parsed = JSON.parse(payload);
+      requestId = parsed.id || null;
+    } catch {
+      // Ignore parse errors
+    }
+
+    response.blockedResponse = {
+      jsonrpc: "2.0",
+      id: requestId,
+      error: {
+        code: -32000,
+        message: "Request blocked by security policy",
+        data: {
+          reason: result.reason || "Security policy violation",
+          timestamp: Math.floor(Date.now() / 1000),
+          ...result.metadata,
+        },
+      },
+    };
+  }
+
+  return c.json(response);
+});
+
 export default app;

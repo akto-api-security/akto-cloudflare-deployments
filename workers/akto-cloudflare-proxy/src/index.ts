@@ -4,68 +4,207 @@
  * This worker acts as a transparent proxy that:
  * 1. Intercepts incoming HTTP/HTTPS and WebSocket traffic
  * 2. Forwards all requests to a target worker via the MCP service binding
- * 3. Mirrors traffic data to Akto data ingestion service for API discovery
+ * 3. Validates requests/responses via guardrails service (async or blocked mode)
+ * 4. Mirrors traffic data to Akto data ingestion service for API discovery
+ *
+ * MODES:
+ * - async: Validate in background, never block traffic (default)
+ * - blocked: Validate before forwarding, block malicious requests/responses
  *
  * IMPORTANT CONFIGURATION REQUIREMENTS:
  * - MCP Service Binding: Configure in wrangler.jsonc to connect to your target worker
- *   The MCP binding is REQUIRED and must point to the worker you want to proxy traffic to
- *
- * - Data Ingestion Service: Replace <DATA_INGESTION_SERVICE> below with your Akto URL
- *   OR use a service binding if hosting the ingestion service as a Cloudflare worker
+ * - AKTO_GUARDRAILS Service Binding: For validation in blocked mode
+ * - GUARDRAILS_MODE: Set to "async" or "blocked" in wrangler.jsonc
  */
 
+import type { ProxyEnv } from "./types";
+import {
+  validateRequest,
+  validateResponse,
+  createBlockedResponse,
+  extractRequestId,
+  buildLogEntry,
+  ingestLogEntry,
+} from "./blocking";
+
 export default {
-    async fetch(request, env, ctx) {
+  async fetch(request: Request, env: ProxyEnv, ctx: ExecutionContext): Promise<Response> {
     console.log("🚀 Worker handling:", request.method, request.url);
 
-    // Detect WebSocket upgrade
+    const guardrailsMode = (env.GUARDRAILS_MODE || "async").toLowerCase();
+    console.log(`🔧 Guardrails mode: ${guardrailsMode}`);
+
     const upgradeHeader = request.headers.get("Upgrade") || "";
     const isWebSocket = upgradeHeader.toLowerCase() === "websocket";
 
     if (isWebSocket) {
-        console.log("🔄 WebSocket upgrade detected");
-
-        // IMPORTANT: MCP service binding proxies the connection to your target worker
-        // Configure the MCP binding in wrangler.jsonc to point to your target worker
-        const response = await env.MCP.fetch(request);
-
-        // Clone headers only (no body to tee here)
-        ctx.waitUntil(logTraffic(request, response, env, { isWebSocket: true }));
-
-        return response;
+      console.log("🔄 WebSocket upgrade detected");
+      const response = await env.MCP.fetch(request);
+      ctx.waitUntil(logTraffic(request, response, env, { isWebSocket: true }));
+      return response;
     }
 
-    // Normal HTTP(S) traffic
-    let requestForFetch, requestForLog;
-    if (request.body) {
-        const [req1, req2] = request.body.tee();
-        requestForFetch = new Request(request, { body: req1 });
-        requestForLog = new Request(request, { body: req2 });
+    if (guardrailsMode === "blocked") {
+      return handleBlockedMode(request, env, ctx);
     } else {
-        requestForFetch = request;
-        requestForLog = request.clone();
+      return handleAsyncMode(request, env, ctx);
     }
-
-    // IMPORTANT: MCP service binding proxies the request to your target worker
-    // Configure the MCP binding in wrangler.jsonc to point to your target worker
-    const response = await env.MCP.fetch(requestForFetch);
-    console.log("⬅️ Upstream response:", response.status);
-
-    let responseForClient, responseForLog;
-    if (response.body) {
-        const [res1, res2] = response.body.tee();
-        responseForClient = new Response(res1, response);
-        responseForLog = new Response(res2, response);
-    } else {
-        responseForClient = response;
-        responseForLog = response.clone();
-    }
-
-    ctx.waitUntil(logTraffic(requestForLog, responseForLog, env));
-
-    return responseForClient;
-    },
+  },
 };
+
+async function handleAsyncMode(
+  request: Request,
+  env: ProxyEnv,
+  ctx: ExecutionContext
+): Promise<Response> {
+  console.log("📤 [Async Mode] Forwarding request without validation");
+
+  let requestForFetch: Request;
+  let requestForLog: Request;
+
+  if (request.body) {
+    const [req1, req2] = request.body.tee();
+    requestForFetch = new Request(request, { body: req1 });
+    requestForLog = new Request(request, { body: req2 });
+  } else {
+    requestForFetch = request;
+    requestForLog = request.clone();
+  }
+
+  const response = await env.MCP.fetch(requestForFetch);
+  console.log("⬅️ Upstream response:", response.status);
+
+  let responseForClient: Response;
+  let responseForLog: Response;
+
+  if (response.body) {
+    const [res1, res2] = response.body.tee();
+    responseForClient = new Response(res1, response);
+    responseForLog = new Response(res2, response);
+  } else {
+    responseForClient = response;
+    responseForLog = response.clone();
+  }
+
+  ctx.waitUntil(logTraffic(requestForLog, responseForLog, env));
+
+  return responseForClient;
+}
+
+async function handleBlockedMode(
+  request: Request,
+  env: ProxyEnv,
+  ctx: ExecutionContext
+): Promise<Response> {
+  console.log("🛡️ [Blocked Mode] Starting validation flow");
+
+  const requestBody = await readBodyAsText(request);
+  console.log(`📝 Request body length: ${requestBody.length} bytes`);
+
+  console.log("🔍 [Blocked Mode] Phase 1: Validating request");
+  const requestValidation = await validateRequest(requestBody, request, env);
+
+  if (requestValidation.shouldBlock) {
+    console.log("🚫 [Blocked Mode] Request BLOCKED:", requestValidation.reason);
+
+    const requestId = extractRequestId(requestBody);
+    const blockedResponse = createBlockedResponse(
+      requestValidation.reason || "Request blocked by security policy",
+      requestValidation.metadata,
+      requestId
+    );
+
+    const blockedResponseBody = await blockedResponse.text();
+
+    const logEntry = buildLogEntry(
+      request,
+      new Response(blockedResponseBody, blockedResponse),
+      requestBody,
+      blockedResponseBody,
+      true,
+      "request"
+    );
+
+    ctx.waitUntil(ingestLogEntry(logEntry, env));
+
+    return new Response(blockedResponseBody, {
+      status: blockedResponse.status,
+      headers: blockedResponse.headers,
+    });
+  }
+
+  console.log("✅ [Blocked Mode] Request validation passed");
+
+  console.log("📤 [Blocked Mode] Phase 2: Forwarding to MCP server");
+
+  const forwardRequest = new Request(request, {
+    body: requestBody || null,
+  });
+
+  const mcpResponse = await env.MCP.fetch(forwardRequest);
+  console.log(`⬅️ [Blocked Mode] MCP response: ${mcpResponse.status}`);
+
+  const mcpResponseBody = await readBodyAsText(mcpResponse);
+  console.log(`📝 Response body length: ${mcpResponseBody.length} bytes`);
+
+  console.log("🔍 [Blocked Mode] Phase 3: Validating response");
+  const responseValidation = await validateResponse(
+    requestBody,
+    mcpResponseBody,
+    request,
+    mcpResponse.status,
+    env
+  );
+
+  if (responseValidation.shouldBlock) {
+    console.log("🚫 [Blocked Mode] Response BLOCKED:", responseValidation.reason);
+
+    const requestId = extractRequestId(requestBody);
+    const blockedResponse = createBlockedResponse(
+      responseValidation.reason || "Response blocked by security policy",
+      responseValidation.metadata,
+      requestId
+    );
+
+    const blockedResponseBody = await blockedResponse.text();
+
+    const logEntry = buildLogEntry(
+      request,
+      new Response(blockedResponseBody, blockedResponse),
+      requestBody,
+      blockedResponseBody,
+      true,
+      "response"
+    );
+
+    ctx.waitUntil(ingestLogEntry(logEntry, env));
+
+    return new Response(blockedResponseBody, {
+      status: blockedResponse.status,
+      headers: blockedResponse.headers,
+    });
+  }
+
+  console.log("✅ [Blocked Mode] Response validation passed");
+
+  console.log("📨 [Blocked Mode] Phase 4: Returning response to client");
+
+  const logEntry = buildLogEntry(
+    request,
+    new Response(mcpResponseBody, mcpResponse),
+    requestBody,
+    mcpResponseBody,
+    false
+  );
+
+  ctx.waitUntil(ingestLogEntry(logEntry, env));
+
+  return new Response(mcpResponseBody, {
+    status: mcpResponse.status,
+    statusText: mcpResponse.statusText,
+    headers: mcpResponse.headers,
+  });
+}
 
 async function logTraffic(request, response, env, opts = {}) {
     try {
@@ -119,27 +258,26 @@ async function logTraffic(request, response, env, opts = {}) {
         tag: "{\n  \"service\": \"cloudflare\"\n}"
     };
 
-    console.log("📤 Sending log entry to webhook...");
+    console.log("📤 Sending log entry...");
 
-    // IMPORTANT: Replace <DATA_INGESTION_SERVICE> with your Akto data ingestion service URL
-    // Example: "https://traffic.domain.com/api/ingestData"
-    //
-    // ALTERNATIVE: If using a service binding for your Akto ingestion service:
-    // 1. Add a service binding in wrangler.jsonc (e.g., AKTO_INGESTION)
-    // 2. Replace the fetch call below with: await env.AKTO_INGESTION.fetch(aktoReq)
-    const aktoReq = new Request("https://<DATA_INGESTION_SERVICE>/api/ingestData", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ batchData: [logEntry] }),
-    });
-
-    // await env.<CONTAINER_BINDING_VARIABLE_NAME>.fetch(aktoReq);
-    const aktoResp = await fetch(aktoReq);
-
-    if (aktoResp.status == 200) {
-        console.log("✅ Log sent to akto");
+    if (env.AKTO_INGEST_GUARDRAILS) {
+        const response = await env.AKTO_INGEST_GUARDRAILS.fetch(
+            new Request("http://internal/api/ingestData", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ batchData: [logEntry] }),
+            })
+        );
+        console.log(response.ok ? "✅ Log sent" : "❌ Failed:", response.status);
+    } else if (env.DATA_INGESTION_URL) {
+        const response = await fetch(env.DATA_INGESTION_URL + "/api/ingestData", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ batchData: [logEntry] }),
+        });
+        console.log(response.ok ? "✅ Log sent" : "❌ Failed:", response.status);
     } else {
-        console.log("❌ Failed to send data to Akto. Response Status: " + aktoResp?.status);
+        console.warn("⚠️ No ingestion service configured");
     }
     } catch (err) {
     console.error("❌ Log error:", err);

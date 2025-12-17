@@ -106,6 +106,9 @@ export interface ValidationResult {
   modifiedPayload?: string;
   reason?: string;
   metadata?: Record<string, any>;
+  shouldBlock?: boolean;
+  action?: "ALLOW" | "BLOCK";
+  blockedResponse?: Record<string, any>;
 }
 
 export interface ProcessResult {

@@ -163,7 +163,7 @@ export async function handleRequestValidation(
   databaseAbstractorUrl?: string,
   aktoApiToken?: string,
   rateLimitKV?: KVNamespace
-): Promise<{ allowed: boolean; modified: boolean; modifiedPayload?: string; reason?: string }> {
+): Promise<{ allowed: boolean; modified: boolean; modifiedPayload?: string; reason?: string; shouldBlock?: boolean; action?: "ALLOW" | "BLOCK"; metadata?: Record<string, any> }> {
   const processor = new MCPProcessor(
     modelExecutorBinding,
     tbsHost,
@@ -190,6 +190,8 @@ export async function handleRequestValidation(
     reason: processResult.blockedResponse
       ? JSON.stringify(processResult.blockedResponse)
       : undefined,
+    shouldBlock: processResult.isBlocked,
+    action: processResult.isBlocked ? "BLOCK" : "ALLOW",
   };
 }
 
@@ -207,7 +209,7 @@ export async function handleResponseValidation(
   databaseAbstractorUrl?: string,
   aktoApiToken?: string,
   rateLimitKV?: KVNamespace
-): Promise<{ allowed: boolean; modified: boolean; modifiedPayload?: string; reason?: string }> {
+): Promise<{ allowed: boolean; modified: boolean; modifiedPayload?: string; reason?: string; shouldBlock?: boolean; action?: "ALLOW" | "BLOCK"; metadata?: Record<string, any> }> {
   const processor = new MCPProcessor(
     modelExecutorBinding,
     tbsHost,
@@ -228,5 +230,7 @@ export async function handleResponseValidation(
     reason: processResult.blockedResponse
       ? JSON.stringify(processResult.blockedResponse)
       : undefined,
+    shouldBlock: processResult.isBlocked,
+    action: processResult.isBlocked ? "BLOCK" : "ALLOW",
   };
 }
