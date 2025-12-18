@@ -170,15 +170,34 @@ app.post("/api/ingestData", async (c) => {
   // Check if MCP guardrails are enabled via feature flag
   const mcpGuardrailsEnabled = c.env.ENABLE_MCP_GUARDRAILS === "true";
 
-  if (mcpGuardrailsEnabled) {
+  // Parse request to check source - skip validation if already blocked
+  const requestBody = await c.req.json() as any;
+  const batchData: IngestDataBatch[] = requestBody.batchData || [];
+  const isAlreadyBlocked = batchData.some((data) => data.source === "BLOCKED");
+
+  if (mcpGuardrailsEnabled && !isAlreadyBlocked) {
     // Replicate the request to send it to two different places
-    const [requestForGuardrails, requestForContainer] = await replicateRequest(c.req.raw);
+    const [requestForGuardrails, requestForContainer] = await replicateRequest(
+      new Request(c.req.url, {
+        method: "POST",
+        headers: c.req.raw.headers,
+        body: JSON.stringify(requestBody),
+      })
+    );
 
     // Run validation and container ingestion in parallel
-    const [results] = await Promise.all([
+    const [results, containerResponse] = await Promise.all([
       runMcpGuardrails(requestForGuardrails, c.env, c.executionCtx),
       forwardToContainer(requestForContainer, c.env),
     ]);
+
+    // Log container response status
+    if (!containerResponse.ok) {
+      const errorText = await containerResponse.text();
+      console.error("[IngestData] Container ingestion failed:", containerResponse.status, errorText);
+    } else {
+      console.log("[IngestData] Container ingestion successful");
+    }
 
     return c.json({
       success: true,
@@ -186,13 +205,33 @@ app.post("/api/ingestData", async (c) => {
       results,
     });
   } else {
+    // Skip validation for already-blocked requests or when guardrails disabled
+    if (isAlreadyBlocked) {
+      console.log("[IngestData] Skipping MCP validation - request already blocked and validated");
+    }
+
     // Only forward to container without validation
-    await forwardToContainer(c.req.raw, c.env);
+    const containerResponse = await forwardToContainer(
+      new Request(c.req.url, {
+        method: "POST",
+        headers: c.req.raw.headers,
+        body: JSON.stringify(requestBody),
+      }),
+      c.env
+    );
+
+    // Log container response status
+    if (!containerResponse.ok) {
+      const errorText = await containerResponse.text();
+      console.error("[IngestData] Container ingestion failed:", containerResponse.status, errorText);
+    } else {
+      console.log("[IngestData] Container ingestion successful");
+    }
 
     return c.json({
       success: true,
       result: "SUCCESS",
-      message: "Data ingested (MCP guardrails disabled)",
+      message: isAlreadyBlocked ? "Data ingested (validation skipped - already blocked)" : "Data ingested (MCP guardrails disabled)",
     });
   }
 });

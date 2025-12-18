@@ -16,6 +16,14 @@ export async function validateRequest(
 
   try {
     const url = new URL(request.url);
+
+    // Try to extract method from JSON-RPC payload for better logging
+    let rpcMethod = "unknown";
+    try {
+      const parsed = JSON.parse(payload);
+      rpcMethod = parsed.method || "unknown";
+    } catch {}
+
     const validationRequest = {
       payload,
       context: {
@@ -51,6 +59,13 @@ export async function validateRequest(
       }
 
       const result = (await response.json()) as ValidationResult;
+
+      if (result.shouldBlock) {
+        console.log(`[Blocking] REQUEST blocked - Method: ${rpcMethod} - Reason: ${result.reason}`);
+      } else {
+        console.log(`[Blocking] REQUEST allowed - Method: ${rpcMethod}`);
+      }
+
       return result;
     } catch (error: any) {
       clearTimeout(timeoutId);
@@ -145,6 +160,10 @@ export async function validateResponse(
         const validationResult = result.results[0];
         const responseBlocked = !validationResult.responseAllowed;
 
+        if (responseBlocked) {
+          console.log(`[Blocking] RESPONSE blocked - Reason: Response blocked by guardrails`);
+        }
+
         return {
           allowed: !responseBlocked,
           shouldBlock: responseBlocked,
@@ -202,8 +221,9 @@ export function createBlockedResponse(
     },
   };
 
+  // JSON-RPC errors should be returned with HTTP 200 status
   return new Response(JSON.stringify(errorResponse), {
-    status: 403,
+    status: 200,
     headers: {
       "Content-Type": "application/json",
       "X-Blocked-By": "Akto-Guardrails",

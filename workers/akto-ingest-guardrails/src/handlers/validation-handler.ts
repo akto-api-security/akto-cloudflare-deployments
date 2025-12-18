@@ -183,13 +183,25 @@ export async function handleRequestValidation(
     hasAuditRules
   );
 
+  // Extract reason from blockedResponse if available
+  let reason: string | undefined;
+  if (processResult.blockedResponse) {
+    // Try to extract a human-readable reason from the blocked response
+    const blockedResp = processResult.blockedResponse as any;
+    if (blockedResp.error?.data?.reason) {
+      reason = blockedResp.error.data.reason;
+    } else if (blockedResp.error?.message) {
+      reason = blockedResp.error.message;
+    } else {
+      reason = "Request blocked by security policy";
+    }
+  }
+
   return {
     allowed: !processResult.isBlocked,
     modified: !!processResult.modifiedPayload,
     modifiedPayload: processResult.modifiedPayload,
-    reason: processResult.blockedResponse
-      ? JSON.stringify(processResult.blockedResponse)
-      : undefined,
+    reason,
     shouldBlock: processResult.isBlocked,
     action: processResult.isBlocked ? "BLOCK" : "ALLOW",
   };
@@ -223,13 +235,25 @@ export async function handleResponseValidation(
 
   const processResult = await processor.processResponse(payload, valCtx, policies);
 
+  // Extract reason from blockedResponse if available
+  let reason: string | undefined;
+  if (processResult.blockedResponse) {
+    // Try to extract a human-readable reason from the blocked response
+    const blockedResp = processResult.blockedResponse as any;
+    if (blockedResp.error?.data?.reason) {
+      reason = blockedResp.error.data.reason;
+    } else if (blockedResp.error?.message) {
+      reason = blockedResp.error.message;
+    } else {
+      reason = "Response blocked by security policy";
+    }
+  }
+
   return {
     allowed: !processResult.isBlocked,
     modified: !!processResult.modifiedPayload,
     modifiedPayload: processResult.modifiedPayload,
-    reason: processResult.blockedResponse
-      ? JSON.stringify(processResult.blockedResponse)
-      : undefined,
+    reason,
     shouldBlock: processResult.isBlocked,
     action: processResult.isBlocked ? "BLOCK" : "ALLOW",
   };
