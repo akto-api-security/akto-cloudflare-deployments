@@ -27,7 +27,8 @@ export default {
 			return response;
 		}
 
-		const useGuardrails = guardrailsEnabled(env);
+		const useGuardrails =
+			guardrailsEnabled(env) && request.method !== 'GET' && request.method !== 'DELETE';
 
 		let requestForFetch;
 		let requestForLog;
@@ -46,7 +47,8 @@ export default {
 				requestForLog = request.clone();
 			}
 
-			const response = await fetch(requestForFetch);
+			// const response = await fetch(requestForFetch);
+			const response = await proxyToUpstream(requestForFetch);
 			console.log('⬅️ Upstream response:', response.status);
 
 			let responseForClient, responseForLog;
@@ -268,10 +270,9 @@ async function validateGuardrails(phase, logEntry, env) {
 		const res = await fetch(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(logEntry),
+			body: JSON.stringify({ ...logEntry, contextSource: 'AGENTIC' }),
 		});
 		const text = await res.text();
-		console.log('response from guardrail: ', text);
 		console.log('response from guardrail: ', text);
 		try {
 			gr = JSON.parse(text);
