@@ -27,8 +27,8 @@ export default {
 			return response;
 		}
 
-		const useGuardrails =
-			guardrailsEnabled(env) && request.method !== 'GET' && request.method !== 'DELETE';
+		const useGuardrails = shouldApplyGuardrails(request, env);
+		console.log(`Apply guardrails on ${request.url} -> ${useGuardrails}`)
 
 		let requestForFetch;
 		let requestForLog;
@@ -176,7 +176,7 @@ async function logTraffic(request, response, env, opts = {}) {
 		console.log('📋 Log entry:', JSON.stringify(logEntry, null, 2));
 		console.log('📤 Sending log entry to webhook...');
 
-		const aktoReq = new Request('https://<DATA_INGESTION_SERVICE>/api/ingestData', {
+		const aktoReq = new Request('https://1726615470-guardrails.akto.io/api/ingestData', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', 'x-api-key': 'YOUR_AKTO_API_KEY' },
 			body: JSON.stringify({ batchData: [logEntry] }),
@@ -210,11 +210,22 @@ async function readBodyAsText(obj, maxSize = 64 * 1024) {
 	}
 }
 
-function guardrailsEnabled(env) {
-	const v = env?.APPLY_AKTO_GUARDRAILS;
-	if (v === true) return true;
-	if (typeof v === 'string') return v === 'true' || v === '1';
-	return false;
+function shouldApplyGuardrails(request, env) {
+	const enabled = env?.APPLY_AKTO_GUARDRAILS === true || (typeof env?.APPLY_AKTO_GUARDRAILS === 'string' && (env.APPLY_AKTO_GUARDRAILS === 'true' || env.APPLY_AKTO_GUARDRAILS === '1'));
+	if (!enabled) return false;
+	if (request.method === 'DELETE') return false;
+
+	const raw = env?.AKTO_ENDPOINTS_TO_GUARD;
+	if (typeof raw !== 'string' || raw.trim() === '') {
+		return false;
+	}
+	const requestPath = new URL(request.url).pathname.toLowerCase();
+	const guardedNeedles = raw
+		.split(',')
+		.map((s) => s.trim())
+		.filter(Boolean)
+		.map((s) => s.replace(/^\/+/, '').toLowerCase());
+	return guardedNeedles.some((needle) => requestPath.includes(needle));
 }
 
 // Temporary for local/testing: rewrites URL to TARGET. Replace all proxyToUpstream(req) with fetch(req).
@@ -263,14 +274,34 @@ async function validateGuardrails(phase, logEntry, env) {
 		console.warn('⚠️ AKTO_GUARDRAILS_URL is missing or empty; skipping guardrails (' + phase + ')');
 		return { type: 'proceed', gr: null };
 	}
-	console.log("calling guardrails: ", JSON.stringify(logEntry))
+	let payloadForGuardrails = { ...logEntry, contextSource: 'AGENTIC' };
+	let wrappedResponsePayload = false;
+	let isJson = true;
+	if (phase === 'response' && typeof payloadForGuardrails.responsePayload === 'string') {
+		const t = payloadForGuardrails.responsePayload.trim();
+		if (t !== '') {
+			try {
+				JSON.parse(t);
+			} catch {
+				isJson = false;
+			}
+		}
+		if (!isJson) {
+			payloadForGuardrails = {
+				...payloadForGuardrails,
+				responsePayload: JSON.stringify({ response: payloadForGuardrails.responsePayload }),
+			};
+			wrappedResponsePayload = true;
+		}
+	}
+	console.log('calling guardrails: ', JSON.stringify(payloadForGuardrails));
 	const url = `${base}/api/validate/${phase}`;
-	let gr = { Allowed: true, Modified: false }
+	let gr = { Allowed: true, Modified: false };
 	try {
 		const res = await fetch(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ ...logEntry, contextSource: 'AGENTIC' }),
+			body: JSON.stringify(payloadForGuardrails),
 		});
 		const text = await res.text();
 		console.log('response from guardrail: ', text);
@@ -279,11 +310,25 @@ async function validateGuardrails(phase, logEntry, env) {
 		} catch {
 			console.log('⚠️ Guardrails non-JSON response:', res.status, text.slice(0, 200));
 		}
+		if (phase === 'response' && wrappedResponsePayload && gr?.Modified === true && typeof gr?.ModifiedPayload === 'string') {
+			try {
+				const parsed = JSON.parse(gr.ModifiedPayload);
+				if (parsed && typeof parsed === 'object' && typeof parsed.response === 'string') {
+					gr = { ...gr, ModifiedPayload: parsed.response };
+				}
+			} catch {
+				// keep ModifiedPayload as-is if it's not the wrapper format
+			}
+		}
 	} catch (e) {
 		console.error('⚠️ Guardrails fetch error:', e);
 	}
-	if (!gr || typeof gr.Allowed !== 'boolean') return { type: 'proceed', gr };
-	if (!gr.Allowed) return { type: 'block', gr };
+	if (!gr || typeof gr.Allowed !== 'boolean') {
+		return { type: 'proceed', gr };
+	}
+	if (!gr.Allowed) {
+		return { type: 'block', gr };
+	}
 	if (gr.Modified === true && gr.ModifiedPayload != null && String(gr.ModifiedPayload).length > 0) {
 		return { type: 'modified', gr };
 	}
@@ -292,7 +337,7 @@ async function validateGuardrails(phase, logEntry, env) {
 
 function guardrailsBlockedBody(gr) {
 	return JSON.stringify({
-		error: 'This request is blocked due to security reasons',
+		error: 'Request is blocked due to security reasons',
 		reason: gr?.Reason ?? '',
 	});
 }

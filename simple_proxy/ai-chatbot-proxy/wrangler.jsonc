@@ -11,7 +11,9 @@
 		"enabled": true,
 	},
 	"upload_source_maps": true,
-	"compatibility_flags": ["nodejs_compat"],
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
@@ -32,7 +34,7 @@
 	"vars": {
 		"APPLY_AKTO_GUARDRAILS": "true",
 		"AKTO_GUARDRAILS_URL": "https://1726615470-guardrails.akto.io",
-		"AKTO_GUARDRAILS_RESPONSE_URL": "https://1726615470-guardrails.akto.io",
+		"AKTO_ENDPOINTS_TO_GUARD": "/api/openai/conversations/",
 	},
 	/**
 	 * Static Assets
