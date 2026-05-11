@@ -20,7 +20,7 @@
 	"containers": [
 		{
 			"class_name": "AktoMiniRuntimeServiceContainer",
-			"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/mrs:testing9",
+			"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/mrs:latest",
 			"max_instances": 10,
 			"instance_type": "standard-1",
 			"name": "akto-mini-runtime-service-container"

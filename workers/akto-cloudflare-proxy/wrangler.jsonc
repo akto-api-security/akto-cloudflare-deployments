@@ -1,34 +1,41 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "akto-cloudflare-proxy",
-	"main": "src/index.ts",
+	"main": "src/index.js",
 	"compatibility_date": "2025-06-23",
-	"compatibility_flags": [
-		"nodejs_compat"
-	],
 	"observability": {
 		"enabled": true
 	},
+
 	"services": [
 		{
-			"binding": "MCP",
-			"service": "<YOUR_TARGET_WORKER_NAME>"
+			// akto-ingest-guardrails must be deployed before this worker.
+			// Handles both traffic ingestion (/api/ingestData) and guardrails
+			// validation (/api/validate/request, /api/validate/response).
+			"binding": "AKTO_INGESTION_WORKER",
+			"service": "akto-ingest-guardrails"
 		}
 	],
+
+	"vars": {
+		// Set to "true" to enable request guardrails (blocking + redaction).
+		// Requires akto-guardrails-executor to be deployed first.
+		// Set to "false" for pure async traffic monitoring (zero added latency).
+		"APPLY_AKTO_GUARDRAILS": "true",
+
+		// Optional: comma-separated path substrings to apply guardrails on.
+		// Leave empty to guard all endpoints. Example: "/api/chat,/api/completions"
+		"AKTO_ENDPOINTS_TO_GUARD": "",
+
+		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
+		"AKTO_ACCOUNT_ID": "1000000"
+	},
+
 	"routes": [
 		{
+			// Update to match your domain — e.g., "api.yourdomain.com/*"
 			"pattern": "*.yourdomain.com/*",
 			"zone_name": "yourdomain.com"
 		}
 	]
-
-	/**
-	 * Configuration Notes:
-	 * 1. Replace <YOUR_TARGET_WORKER_NAME> with the name of your target worker
-	 * 2. The MCP binding is required - this proxies all requests to your target worker
-	 * 3. Update src/index.ts with your Akto data ingestion service URL
-	 * 4. Configure routes above:
-	 *    - pattern: Route pattern (e.g., "*.yourdomain.com/*", "api.yourdomain.com/*")
-	 *    - zone_name: Your domain name
-	 */
 }
