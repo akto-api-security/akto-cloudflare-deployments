@@ -17,7 +17,7 @@
 		{
 			"name": "akto-guardrails-executor-container",
 			"class_name": "AktoGuardrailsExecutorContainer",
-			"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/agent-guard-executor:latest",
+			"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/akto-agent-guard-executor:local",
 			"instance_type": "standard-3",
 			"max_instances": 10
 		}

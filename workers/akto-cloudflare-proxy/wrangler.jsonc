@@ -20,7 +20,6 @@
 	"vars": {
 		// Set to "true" to enable request guardrails (blocking + redaction).
 		// Requires akto-guardrails-executor to be deployed first.
-		// Set to "false" for pure async traffic monitoring (zero added latency).
 		"APPLY_AKTO_GUARDRAILS": "true",
 
 		// Optional: comma-separated path substrings to apply guardrails on.
@@ -34,7 +33,7 @@
 	"routes": [
 		{
 			// Update to match your domain — e.g., "api.yourdomain.com/*"
-			"pattern": "*.yourdomain.com/*",
+			"pattern": "api.yourdomain.com/*",
 			"zone_name": "yourdomain.com"
 		}
 	]

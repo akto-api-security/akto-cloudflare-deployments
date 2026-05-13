@@ -35,7 +35,6 @@ No changes required to your origin server or code.
 ]
 ```
 
-
 ## Deploy
 
 ```bash
