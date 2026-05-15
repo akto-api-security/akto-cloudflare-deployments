@@ -1,0 +1,52 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "akto-agent-guard-executor",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-23",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"workers_dev": true,
+
+	"observability": {
+		"enabled": true,
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		},
+		"traces": {
+			"enabled": true
+		}
+	},
+
+	"containers": [
+		{
+			"name": "akto-agent-guard-executor-container",
+			"class_name": "AktoAgentGuardExecutorContainer",
+			"image": "registry.cloudflare.com/YOUR_ACCOUNT_ID/agent-guard-executor:v1",
+			"instance_type": "standard-3",
+			"max_instances": 10
+		}
+	],
+
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "AktoAgentGuardExecutorContainer",
+				"name": "AKTO_AGENT_GUARD_EXECUTOR_CONTAINER"
+			}
+		]
+	},
+
+	"migrations": [
+		{
+			"new_sqlite_classes": [
+				"AktoAgentGuardExecutorContainer"
+			],
+			"tag": "v1"
+		}
+	],
+
+	"vars": {}
+
+}

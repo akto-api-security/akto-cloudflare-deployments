@@ -1,31 +1,14 @@
 import { Container } from "@cloudflare/containers";
 import { Hono } from "hono";
-import { handleBatchValidation } from "./handlers/validation-handler";
-import type { IngestDataBatch } from "./types/mcp";
-import { replicateRequest } from "./utils/request-utils";
 
-export class AktoMiniRuntimeServiceContainer extends Container {
+export class AktoDataIngestionContainer extends Container {
   defaultPort = 8080;
   sleepAfter = "2h";
-  requiredPorts = [8080];
-
-  private workerEnv: any;
-
-  constructor(state: DurableObjectState, env: any) {
-    super(state, env);
-    this.workerEnv = env;
-  }
 
   override async fetch(request: Request): Promise<Response> {
     this.envVars = {
-      AKTO_LOG_LEVEL: "DEBUG",
-      DATABASE_ABSTRACTOR_SERVICE_URL: this.workerEnv.DATABASE_ABSTRACTOR_SERVICE_URL || "https://cyborg.akto.io",
-      DATABASE_ABSTRACTOR_SERVICE_TOKEN: this.workerEnv.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "",
-      AKTO_TRAFFIC_QUEUE_THRESHOLD: "100",
-      AKTO_INACTIVE_QUEUE_PROCESSING_TIME: "5000",
-      AKTO_TRAFFIC_PROCESSING_JOB_INTERVAL: "10",
-      AKTO_CONFIG_NAME: "STAGING",
-      RUNTIME_MODE: "HYBRID",
+      AKTO_TRAFFIC_BATCH_SIZE: "100",
+      AKTO_TRAFFIC_BATCH_TIME_SECS: "10",
     };
 
     try {
@@ -35,7 +18,7 @@ export class AktoMiniRuntimeServiceContainer extends Container {
       });
       return await super.fetch(request);
     } catch (error) {
-      console.error("[Container] Fetch error:", error);
+      console.error("[Data-Ingestion Container] Fetch error:", error);
       return new Response(JSON.stringify({ error: "Container startup failed", details: String(error) }), {
         status: 503,
         headers: { "Content-Type": "application/json" },
@@ -43,141 +26,116 @@ export class AktoMiniRuntimeServiceContainer extends Container {
     }
   }
 
-  override onStart() { console.log("[Container] Started"); }
-  override onStop()  { console.log("[Container] Stopped"); }
-  override onError(error: unknown) { console.log("[Container] Error:", error); }
+  override onStart() { console.log("[Data-Ingestion Container] Started"); }
+  override onStop()  { console.log("[Data-Ingestion Container] Stopped"); }
+  override onError(error: unknown) { console.error("[Data-Ingestion Container] Error:", error); }
 }
 
-const app = new Hono<{
-  Bindings: {
-    AKTO_MINI_RUNTIME_SERVICE_CONTAINER: DurableObjectNamespace<AktoMiniRuntimeServiceContainer>;
-    AKTO_GUARDRAILS_EXECUTOR: Fetcher;
-    DATABASE_ABSTRACTOR_SERVICE_URL: string;
-    DATABASE_ABSTRACTOR_SERVICE_TOKEN: string;
-    THREAT_BACKEND_URL: string;
-    THREAT_BACKEND_TOKEN: string;
-    ENABLE_MCP_GUARDRAILS: string;
-    AKTO_GUARDRAILS_RATE_LIMIT_KV: KVNamespace;
-  };
-}>();
+type Env = {
+  AKTO_DATA_INGESTION_CONTAINER: DurableObjectNamespace<AktoDataIngestionContainer>;
+  AKTO_GUARDRAILS_EXECUTOR: Fetcher;
+  AKTO_MINI_RUNTIME_WORKER: Fetcher;
+  ENABLE_MCP_GUARDRAILS: string;
+};
 
-function forwardToContainer(
-  request: Request,
-  env: { AKTO_MINI_RUNTIME_SERVICE_CONTAINER: DurableObjectNamespace<AktoMiniRuntimeServiceContainer> }
-): Promise<Response> {
-  const containerId = env.AKTO_MINI_RUNTIME_SERVICE_CONTAINER.idFromName("main");
-  const container = env.AKTO_MINI_RUNTIME_SERVICE_CONTAINER.get(containerId);
-  return container.fetch(request);
+const app = new Hono<{ Bindings: Env }>();
+
+function forwardToDataIngestion(request: Request, env: Env): Promise<Response> {
+  const id = env.AKTO_DATA_INGESTION_CONTAINER.idFromName("main");
+  return env.AKTO_DATA_INGESTION_CONTAINER.get(id).fetch(request);
 }
 
-function getEnvConfig(env: {
-  DATABASE_ABSTRACTOR_SERVICE_URL: string;
-  DATABASE_ABSTRACTOR_SERVICE_TOKEN: string;
-  THREAT_BACKEND_URL: string;
-  THREAT_BACKEND_TOKEN: string;
-}) {
-  return {
-    dbUrl:    env.DATABASE_ABSTRACTOR_SERVICE_URL  || "https://cyborg.akto.io",
-    dbToken:  env.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "",
-    tbsHost:  env.THREAT_BACKEND_URL               || "https://tbs.akto.io",
-    tbsToken: env.THREAT_BACKEND_TOKEN             || "",
-  };
+function forwardToMiniRuntime(body: string, env: Env): Promise<Response> {
+  return env.AKTO_MINI_RUNTIME_WORKER.fetch(
+    new Request("https://akto-mini-runtime/utility/ingestTraffic", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    })
+  );
 }
-
-// ─── Health ───────────────────────────────────────────────────────────────────
 
 app.get("/health", (c) => c.json({ success: true, status: "healthy" }));
 
 // ─── /api/http-proxy ──────────────────────────────────────────────────────────
-// Unified endpoint used by akto-cloudflare-proxy and the Kong plugin.
-//
+// Called by akto-cloudflare-proxy for every intercepted request.
 // Query params:
-//   guardrails=true        run guardrails validation (requires ENABLE_MCP_GUARDRAILS=true)
-//   ingest_data=true       forward traffic to the mini-runtime container
-//   akto_connector=<name>  connector identifier (kong | cloudflare | …)
-//
-// Body:   single IngestDataBatch item (flat JSON, not wrapped in batchData)
-// Returns { data: { guardrailsResult: { Allowed: bool, Reason: string } } }
+//   guardrails=true     validate via akto-guardrails-executor
+//   ingest_data=true    ingest via data-ingestion container + forward to mini-runtime
 
 app.post("/api/http-proxy", async (c) => {
   const guardrails = c.req.query("guardrails") === "true";
   const ingestData = c.req.query("ingest_data") === "true";
 
-  const batchItem = await c.req.json<IngestDataBatch>();
-  const { dbUrl, dbToken, tbsHost, tbsToken } = getEnvConfig(c.env);
+  const bodyText = await c.req.text();
 
   let guardrailsAllowed = true;
   let guardrailsReason  = "";
 
   if (c.env.ENABLE_MCP_GUARDRAILS === "true" && guardrails) {
-    const results = await handleBatchValidation([batchItem], {
-      dbUrl,
-      dbToken,
-      modelExecutorBinding: c.env.AKTO_GUARDRAILS_EXECUTOR,
-      tbsHost,
-      tbsToken,
-      executionCtx: c.executionCtx,
-      rateLimitKV: c.env.AKTO_GUARDRAILS_RATE_LIMIT_KV,
-    });
-
-    const r = results[0];
-    if (r && !r.requestAllowed) {
-      guardrailsAllowed = false;
-      guardrailsReason  = r.requestReason  || "Request blocked by guardrails";
-    } else if (r && !r.responseAllowed) {
-      guardrailsAllowed = false;
-      guardrailsReason  = r.responseReason || "Response blocked by guardrails";
+    try {
+      const res = await c.env.AKTO_GUARDRAILS_EXECUTOR.fetch(
+        new Request("https://guardrails-executor/api/validate/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: bodyText,
+        })
+      );
+      const text = await res.text();
+      try {
+        const json = JSON.parse(text) as any;
+        guardrailsAllowed = json?.Allowed ?? true;
+        guardrailsReason  = json?.Reason  ?? "";
+      } catch {
+        console.error("[Guardrails] Non-JSON response:", text.slice(0, 200));
+      }
+    } catch (error) {
+      console.error("[Guardrails] Executor error:", error);
     }
   }
 
   if (ingestData) {
-    await forwardToContainer(
-      new Request("https://akto-ingest/api/ingestData", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batchData: [batchItem] }),
-      }),
-      c.env
-    );
+    const batchBody = JSON.stringify({ batchData: [JSON.parse(bodyText)] });
+    await Promise.all([
+      forwardToDataIngestion(
+        new Request("https://akto-ingest/api/ingestData", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: batchBody,
+        }),
+        c.env
+      ).catch((e) => console.error("[Ingest] Data-ingestion error:", e)),
+      forwardToMiniRuntime(bodyText, c.env)
+        .catch((e) => console.error("[Ingest] Mini-runtime error:", e)),
+    ]);
   }
 
   return c.json({ data: { guardrailsResult: { Allowed: guardrailsAllowed, Reason: guardrailsReason } } });
 });
 
 // ─── /api/ingestData ──────────────────────────────────────────────────────────
-// Async ingestion endpoint called by akto-cloudflare-proxy after the upstream
-// response is complete. Forwards traffic to the mini-runtime container for API
-// discovery; also runs guardrails validation when ENABLE_MCP_GUARDRAILS=true.
-//
-// Body: { batchData: IngestDataBatch[] }
+// Called by akto-cloudflare-proxy when guardrails are disabled.
 
 app.post("/api/ingestData", async (c) => {
-  const mcpGuardrailsEnabled = c.env.ENABLE_MCP_GUARDRAILS === "true";
-
-  if (mcpGuardrailsEnabled) {
-    const [requestForGuardrails, requestForContainer] = await replicateRequest(c.req.raw);
-    const { dbUrl, dbToken, tbsHost, tbsToken } = getEnvConfig(c.env);
-
-    const requestBody = await requestForGuardrails.json() as any;
-    const batchData: IngestDataBatch[] = requestBody.batchData || [];
-
-    const [results] = await Promise.all([
-      handleBatchValidation(batchData, {
-        dbUrl,
-        dbToken,
-        modelExecutorBinding: c.env.AKTO_GUARDRAILS_EXECUTOR,
-        tbsHost,
-        tbsToken,
-        executionCtx: c.executionCtx,
-        rateLimitKV: c.env.AKTO_GUARDRAILS_RATE_LIMIT_KV,
+  const bodyText = await c.req.text();
+  let miniRuntimeBody = bodyText;
+  try {
+    const parsed = JSON.parse(bodyText) as { batchData?: unknown[] };
+    const items = parsed.batchData ?? [parsed];
+    miniRuntimeBody = JSON.stringify(items.length === 1 ? items[0] : items);
+  } catch { /* send as-is if not valid JSON */ }
+  await Promise.all([
+    forwardToDataIngestion(
+      new Request("https://akto-ingest/api/ingestData", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: bodyText,
       }),
-      forwardToContainer(requestForContainer, c.env),
-    ]);
-
-    return c.json({ success: true, result: "SUCCESS", results });
-  }
-
-  await forwardToContainer(c.req.raw, c.env);
+      c.env
+    ).catch((e) => console.error("[Ingest] Data-ingestion error:", e)),
+    forwardToMiniRuntime(miniRuntimeBody, c.env)
+      .catch((e) => console.error("[Ingest] Mini-runtime error:", e)),
+  ]);
   return c.json({ success: true, result: "SUCCESS" });
 });
 

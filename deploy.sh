@@ -1,14 +1,25 @@
 #!/bin/bash
 # Akto Cloudflare Deployment Script
 #
-# Deploys the full Akto stack to Cloudflare in the correct order:
-# - Pulls pre-built Docker images for mini-runtime and data-ingestion-service
-# - Deploys workers with guardrails validation and API discovery
+# Deploys the full Akto stack to Cloudflare in the correct order.
+# Copy .env.example → .env, fill in values, then run ./deploy.sh
 #
-# Flow: Client → akto-cloudflare-proxy → akto-ingest-guardrails/guardrails-executor
-#       → origin server → async: data-ingestion-service → mini-runtime → Akto
+# Workers deployed:
+#   1. akto-mini-runtime          — mini-runtime container (processes & sends to Akto)
+#   2. akto-agent-guard-executor         — agent-guard-executor container (Python scanner)
+#   3. akto-guardrails-executor   — guardrails-service container (policy enforcement)
+#   4. akto-ingest-guardrails     — data-ingestion-service container (receives traffic)
+#   5. akto-cloudflare-proxy      — route worker (intercepts client traffic)
+#
+# Service bindings (worker → worker, no HTTP):
+#   akto-cloudflare-proxy    → akto-ingest-guardrails     (AKTO_INGESTION_WORKER)
+#   akto-ingest-guardrails   → akto-guardrails-executor   (AKTO_GUARDRAILS_EXECUTOR)
+#   akto-ingest-guardrails   → akto-mini-runtime          (AKTO_MINI_RUNTIME_WORKER)
+#
+# External service (not deployed here):
+#   AGENT_GUARD_ENGINE_URL — set in akto-guardrails-executor/wrangler.jsonc
 
-set -e
+set -eo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
@@ -22,6 +33,73 @@ err()    { echo -e "${RED}  ✗${NC}  $1"; }
 step()   { echo -e "\n${BOLD}  [$1]${NC}  $2"; }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ─── Load .env ────────────────────────────────────────────────────────────────
+ENV_FILE="$REPO_ROOT/.env"
+if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    set -a; source "$ENV_FILE"; set +a
+    ok "Loaded .env"
+else
+    warn ".env not found — copy .env.example → .env and fill in values."
+    warn "Falling back to interactive prompts."
+fi
+
+# ─── Container image helpers ──────────────────────────────────────────────────
+# docker tag / docker buildx build --load on the default "docker" driver both
+# lose platform metadata when the source image has none. A "docker-container"
+# driver buildx builder re-creates the image config and correctly embeds
+# linux/amd64, which wrangler validates before accepting the push.
+_ensure_buildx_builder() {
+    if ! docker buildx inspect akto-cf-builder &>/dev/null 2>&1; then
+        docker buildx create --name akto-cf-builder \
+            --driver docker-container --bootstrap
+    fi
+}
+
+_push_cf_image() {
+    local src="$1"   # source image (already pulled locally)
+    local dst="$2"   # destination: registry.cloudflare.com/ACCOUNT/name:tag
+
+    _ensure_buildx_builder
+
+    echo "FROM $src" | \
+        docker buildx build \
+            --builder akto-cf-builder \
+            --platform linux/amd64 \
+            --provenance=false \
+            --load \
+            -t "$dst" \
+            -
+
+    npx wrangler containers push "$dst"
+}
+
+# ─── Patch registry URL (idempotent) ─────────────────────────────────────────
+_patch_registry() {
+    local file="$1"
+    sed -i.bak \
+        "s|registry.cloudflare.com/[^/]*/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
+        "$file"
+    rm -f "${file}.bak"
+}
+
+# ─── Set wrangler secret non-interactively when value is available ─────────────
+_set_secret() {
+    local key="$1"
+    local value="$2"
+    local prompt="$3"
+
+    if [ -n "$value" ]; then
+        printf '%s' "$value" | npx wrangler secret put "$key"
+        ok "${key} set"
+    else
+        warn "${key} not set in .env — enter it now (or press Ctrl+C to abort):"
+        echo "  ↳ ${prompt}"
+        npx wrangler secret put "$key"
+        ok "${key} set"
+    fi
+}
 
 # ─── Prerequisites ────────────────────────────────────────────────────────────
 check_prereqs() {
@@ -52,190 +130,220 @@ check_prereqs() {
     fi
 }
 
-# ─── First-time Java service builds + image push ──────────────────────────────
-# Pulls pre-built Docker images and pushes them to Cloudflare registry.
-push_java_images() {
-    echo ""
-    echo -e "  ${BOLD}Pulling and pushing Java service Docker images${NC}"
-    echo ""
+# ─── Prompts (only used as fallback when .env values are missing) ─────────────
+_require_cloudflare_account_id() {
+    if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+        echo ""
+        echo -e "${BOLD}  Cloudflare Account ID${NC}"
+        echo "  ↳ https://dash.cloudflare.com → your account → Overview (right sidebar)"
+        read -rp "  Account ID: " CLOUDFLARE_ACCOUNT_ID
+        [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && { err "Cannot be empty."; exit 1; }
+    fi
+    export CLOUDFLARE_ACCOUNT_ID
+    ok "Cloudflare Account ID: $CLOUDFLARE_ACCOUNT_ID"
+}
 
+_require_akto_account_id() {
+    if [ -z "$AKTO_ACCOUNT_ID" ]; then
+        echo ""
+        echo -e "${BOLD}  Akto Account ID${NC}"
+        echo "  ↳ Akto Dashboard → Settings → Account  (default: 1000000)"
+        read -rp "  Akto Account ID [1000000]: " AKTO_ACCOUNT_ID
+        AKTO_ACCOUNT_ID="${AKTO_ACCOUNT_ID:-1000000}"
+    fi
+    ok "Akto Account ID: $AKTO_ACCOUNT_ID"
+}
+
+_require_image_tag() {
+    if [ -z "$IMAGE_TAG" ]; then
+        echo ""
+        echo -e "${BOLD}  Image version tag${NC}"
+        echo "  Cloudflare does not allow overwriting an existing tag."
+        echo "  Use a new tag for each push (e.g. v2, v3, ...)."
+        read -rp "  Image tag [v1]: " IMAGE_TAG
+        IMAGE_TAG="${IMAGE_TAG:-v1}"
+    fi
+    ok "Image tag: ${IMAGE_TAG}"
+}
+
+_require_route_pattern() {
+    if [ -z "$ROUTE_PATTERN" ]; then
+        echo ""
+        echo -e "  ${BOLD}Route pattern${NC} — the Cloudflare route this proxy intercepts."
+        echo "  Examples:  api.yourdomain.com/*   or   *.yourdomain.com/*"
+        read -rp "  Route pattern: " ROUTE_PATTERN
+    fi
+}
+
+# ─── Image push ───────────────────────────────────────────────────────────────
+push_images() {
     if ! command -v docker &>/dev/null || ! docker info &>/dev/null 2>&1; then
         err "Docker is required to push images."
-        err "Install Docker from https://docker.com, start it, then re-run this script."
+        err "Install Docker from https://docker.com, start it, then re-run."
         exit 1
     fi
     ok "Docker available"
 
-    step "1" "Pulling mini-runtime from Docker Hub"
+    echo ""
+    echo -e "  ${BOLD}Pushing images to Cloudflare registry (tag: ${IMAGE_TAG})${NC}"
+    echo ""
+
+    step "1" "mini-runtime"
     docker pull --platform linux/amd64 aktosecurity/mini-runtime:local
-    ok "mini-runtime pulled"
+    _push_cf_image \
+        "aktosecurity/mini-runtime:local" \
+        "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/mini-runtime:${IMAGE_TAG}"
+    ok "mini-runtime:${IMAGE_TAG} pushed"
 
-    step "2" "Pushing mini-runtime to Cloudflare registry"
-    docker tag aktosecurity/mini-runtime:local "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/mini-runtime:v1"
-    npx wrangler containers push "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/mini-runtime:v1"
-    ok "mini-runtime pushed to Cloudflare registry"
-
-    step "3" "Pulling data-ingestion-service from Docker Hub"
+    step "2" "data-ingestion-service"
     docker pull --platform linux/amd64 aktosecurity/data-ingestion-service:latest
-    ok "data-ingestion-service pulled"
+    _push_cf_image \
+        "aktosecurity/data-ingestion-service:latest" \
+        "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/data-ingestion-service:${IMAGE_TAG}"
+    ok "data-ingestion-service:${IMAGE_TAG} pushed"
 
-    step "4" "Pushing data-ingestion-service to Cloudflare registry"
-    docker tag aktosecurity/data-ingestion-service:latest "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/data-ingestion-service:v1"
-    npx wrangler containers push "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/data-ingestion-service:v1"
-    ok "data-ingestion-service pushed to Cloudflare registry"
+    step "3" "guardrails-service"
+    docker pull --platform linux/amd64 aktosecurity/akto-guardrails-service:local
+    _push_cf_image \
+        "aktosecurity/akto-guardrails-service:local" \
+        "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/guardrails-service:${IMAGE_TAG}"
+    ok "guardrails-service:${IMAGE_TAG} pushed"
 
-    cd "$REPO_ROOT"
-    echo ""
-    ok "Java service images pushed to Cloudflare registry"
-}
-
-# ─── First-time Worker image push ─────────────────────────────────────────────
-# Pushes Cloudflare Worker container images (MRS, executor).
-push_worker_images() {
-    local push_executor="$1"  # "true" or "false"
-
-    echo ""
-    echo -e "  ${BOLD}Pushing Cloudflare Worker container images${NC}"
-    echo ""
-
-    if [ "$push_executor" = "true" ]; then
-        echo "  Pushing akto-guardrails-executor image..."
-        cd "$REPO_ROOT/workers/akto-guardrails-executor"
-        npm install --silent
-        docker pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
-        docker buildx build --platform linux/amd64 --load -t agent-guard-executor:v1 - <<'EOF'
-FROM aktosecurity/akto-agent-guard-executor:local
-EOF
-        npx wrangler containers push agent-guard-executor:v1
-        ok "agent-guard-executor pushed"
-        cd "$REPO_ROOT"
-    fi
+    step "4" "agent-guard-executor (Python scanner)"
+    docker pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
+    _push_cf_image \
+        "aktosecurity/akto-agent-guard-executor:local" \
+        "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/agent-guard-executor:${IMAGE_TAG}"
+    ok "agent-guard-executor:${IMAGE_TAG} pushed"
 
     echo ""
-    echo "  Pushing akto-ingest-guardrails (MRS) image..."
-    cd "$REPO_ROOT/workers/akto-ingest-guardrails"
-    npm install --silent
-    docker pull --platform linux/amd64 aktosecurity/mini-runtime-service:latest
-    docker buildx build --platform linux/amd64 --load -t mrs:v1 - <<'EOF'
-FROM aktosecurity/mini-runtime-service:latest
-EOF
-    npx wrangler containers push mrs:v1
-    ok "mrs pushed"
-    cd "$REPO_ROOT"
-
-    echo ""
-    ok "Worker images pushed to Cloudflare registry"
-}
-
-# ─── Prompts ──────────────────────────────────────────────────────────────────
-ask_cloudflare_account_id() {
-    echo ""
-    echo -e "${BOLD}  Cloudflare Account ID${NC}"
-    echo "  ↳ https://dash.cloudflare.com → your account → Overview (right sidebar)"
-    read -rp "  Account ID: " CLOUDFLARE_ACCOUNT_ID
-    [ -z "$CLOUDFLARE_ACCOUNT_ID" ] && { err "Cannot be empty."; exit 1; }
-    ok "Cloudflare Account ID: $CLOUDFLARE_ACCOUNT_ID"
-}
-
-ask_akto_account_id() {
-    echo ""
-    echo -e "${BOLD}  Akto Account ID${NC}"
-    echo "  ↳ Akto Dashboard → Settings → Account  (default: 1000000)"
-    read -rp "  Akto Account ID [1000000]: " AKTO_ACCOUNT_ID
-    AKTO_ACCOUNT_ID="${AKTO_ACCOUNT_ID:-1000000}"
-    ok "Akto Account ID: $AKTO_ACCOUNT_ID"
+    ok "All images pushed to Cloudflare registry"
 }
 
 # ─── Workers ──────────────────────────────────────────────────────────────────
+deploy_mini_runtime() {
+    header "Step 1/5 — akto-mini-runtime"
+    cd "$REPO_ROOT/workers/akto-mini-runtime"
+
+    step "1" "Installing dependencies"
+    npm install --silent; ok "Done"
+
+    step "2" "Patching wrangler.jsonc"
+    _patch_registry wrangler.jsonc
+    ok "Image registry: registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/..."
+
+    step "3" "Setting secrets"
+    _set_secret "DATABASE_ABSTRACTOR_SERVICE_TOKEN" "$AKTO_API_TOKEN" \
+        "Akto Dashboard → Quick Start → Hybrid SaaS → Connect → Copy Token"
+
+    step "4" "Deploying"
+    npx wrangler deploy; ok "akto-mini-runtime deployed ✓"
+    cd "$REPO_ROOT"
+}
+
+deploy_agent_guard_executor() {
+    header "Step 2/5 — akto-agent-guard-executor"
+    cd "$REPO_ROOT/workers/akto-agent-guard-executor"
+
+    step "1" "Installing dependencies"
+    npm install --silent; ok "Done"
+
+    step "2" "Patching wrangler.jsonc"
+    _patch_registry wrangler.jsonc
+    ok "Image registry: registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/..."
+
+    step "3" "Deploying"
+    local deploy_out
+    deploy_out=$(npx wrangler deploy 2>&1)
+    echo "$deploy_out"
+    AGENT_GUARD_URL=$(echo "$deploy_out" | grep -o 'https://akto-agent-guard-executor\.[^ ]*' | head -1)
+    if [ -n "$AGENT_GUARD_URL" ]; then
+        ok "akto-agent-guard-executor deployed ✓ → ${AGENT_GUARD_URL}"
+    else
+        ok "akto-agent-guard-executor deployed ✓"
+    fi
+    cd "$REPO_ROOT"
+}
+
 deploy_guardrails_executor() {
-    header "Step 1/3 — akto-guardrails-executor"
+    header "Step 3/5 — akto-guardrails-executor"
     cd "$REPO_ROOT/workers/akto-guardrails-executor"
 
     step "1" "Installing dependencies"
     npm install --silent; ok "Done"
 
-    step "2" "Patching wrangler.jsonc with Cloudflare account ID"
-    sed -i.bak "s|registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" wrangler.jsonc
-    rm -f wrangler.jsonc.bak; ok "Image registry: registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/..."
+    step "2" "Patching wrangler.jsonc"
+    _patch_registry wrangler.jsonc
+    if [ -n "$AGENT_GUARD_URL" ]; then
+        sed -i.bak \
+            -e "s|\"AGENT_GUARD_ENGINE_URL\": \"[^\"]*\"|\"AGENT_GUARD_ENGINE_URL\": \"${AGENT_GUARD_URL}\"|g" \
+            wrangler.jsonc
+        rm -f wrangler.jsonc.bak
+        ok "AGENT_GUARD_ENGINE_URL=${AGENT_GUARD_URL}"
+    else
+        warn "AGENT_GUARD_URL not detected — AGENT_GUARD_ENGINE_URL left empty"
+    fi
 
-    step "3" "Deploying"
+    step "3" "Setting secrets"
+    _set_secret "DATABASE_ABSTRACTOR_SERVICE_TOKEN" "$AKTO_API_TOKEN" \
+        "Akto Dashboard → Quick Start → Hybrid SaaS → Connect → Copy Token"
+
+    step "4" "Deploying"
     npx wrangler deploy; ok "akto-guardrails-executor deployed ✓"
     cd "$REPO_ROOT"
 }
 
 deploy_ingest_guardrails() {
-    local step_prefix="$1"
-    header "${step_prefix} — akto-ingest-guardrails"
+    header "Step 4/5 — akto-ingest-guardrails"
     cd "$REPO_ROOT/workers/akto-ingest-guardrails"
 
     step "1" "Installing dependencies"
     npm install --silent; ok "Done"
 
     step "2" "Patching wrangler.jsonc"
-    sed -i.bak "s|registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" wrangler.jsonc
-    sed -i.bak "s|\"ENABLE_MCP_GUARDRAILS\": \"[^\"]*\"|\"ENABLE_MCP_GUARDRAILS\": \"${ENABLE_GUARDRAILS}\"|g" wrangler.jsonc
+    _patch_registry wrangler.jsonc
+    sed -i.bak \
+        -e "s|\"ENABLE_MCP_GUARDRAILS\": \"[^\"]*\"|\"ENABLE_MCP_GUARDRAILS\": \"true\"|g" \
+        wrangler.jsonc
     rm -f wrangler.jsonc.bak
-    ok "Image registry: registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/...  ENABLE_MCP_GUARDRAILS=${ENABLE_GUARDRAILS}"
+    ok "ENABLE_MCP_GUARDRAILS=true"
 
-    step "3" "KV namespace for rate limiting (optional)"
-    echo ""; read -rp "  Set up KV namespace for rate limiting? (y/N): " SETUP_KV
-    if [[ "$SETUP_KV" =~ ^[Yy]$ ]]; then
-        KV_OUT=$(npx wrangler kv namespace create "AKTO_GUARDRAILS_RATE_LIMIT_KV" 2>&1 || true)
-        KV_ID=$(echo "$KV_OUT" | grep -oE '"id": "[^"]+"' | head -1 | grep -oE '"[^"]+"$' | tr -d '"' || true)
-        if [ -n "$KV_ID" ]; then
-            ok "KV namespace created: $KV_ID — uncomment kv_namespaces in wrangler.jsonc and set id = $KV_ID"
-        else
-            warn "Could not parse KV ID — check Cloudflare Dashboard → Workers KV"
-        fi
-    else
-        warn "Skipping KV — rate limiting disabled"
-    fi
-
-    step "4" "Setting secrets"
-    echo ""
-    echo "  Enter your Akto API token"
-    echo "  ↳ Akto Dashboard → Quick Start → Hybrid SaaS → Connect → Copy Token"
-    echo ""
-    npx wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN; ok "DATABASE_ABSTRACTOR_SERVICE_TOKEN set"
-    npx wrangler secret put THREAT_BACKEND_TOKEN;               ok "THREAT_BACKEND_TOKEN set"
-
-    step "5" "Deploying"
+    step "3" "Deploying"
     npx wrangler deploy; ok "akto-ingest-guardrails deployed ✓"
     cd "$REPO_ROOT"
 }
 
 deploy_proxy() {
-    local step_prefix="$1"
-    header "${step_prefix} — akto-cloudflare-proxy"
+    header "Step 5/5 — akto-cloudflare-proxy"
     cd "$REPO_ROOT/workers/akto-cloudflare-proxy"
 
     step "1" "Installing dependencies"
     npm install --silent; ok "Done"
 
-    step "2" "Configure route"
-    echo ""
-    echo -e "  ${BOLD}Route pattern${NC} — the Cloudflare route this proxy intercepts."
-    echo "  Examples:  api.yourdomain.com/*   or   *.yourdomain.com/*"
-    echo "  The domain must already be active in your Cloudflare account."
-    echo ""
-    read -rp "  Route pattern: " ROUTE_PATTERN
+    step "2" "Patching wrangler.jsonc"
+    _require_route_pattern
     if [ -n "$ROUTE_PATTERN" ]; then
         ZONE=$(echo "$ROUTE_PATTERN" | sed 's/^\*\.//' | sed 's|/.*||' | awk -F. 'NF>=2{print $(NF-1)"."$NF}')
-        sed -i.bak "s|\"pattern\": \"\*\.yourdomain\.com/\*\"|\"pattern\": \"${ROUTE_PATTERN}\"|g" wrangler.jsonc
-        sed -i.bak "s|\"zone_name\": \"yourdomain\.com\"|\"zone_name\": \"${ZONE}\"|g" wrangler.jsonc
+        sed -i.bak \
+            -e "s|\"pattern\": \"[^\"]*\"|\"pattern\": \"${ROUTE_PATTERN}\"|g" \
+            -e "s|\"zone_name\": \"[^\"]*\"|\"zone_name\": \"${ZONE}\"|g" \
+            wrangler.jsonc
         rm -f wrangler.jsonc.bak
         ok "Route: ${ROUTE_PATTERN}  (zone: ${ZONE})"
     else
-        warn "No route set — configure routes in wrangler.jsonc before going live"
+        warn "Route unchanged"
     fi
 
-    step "3" "Patching env vars"
-    sed -i.bak "s|\"APPLY_AKTO_GUARDRAILS\": \"[^\"]*\"|\"APPLY_AKTO_GUARDRAILS\": \"${ENABLE_GUARDRAILS}\"|g" wrangler.jsonc
-    sed -i.bak "s|\"AKTO_ACCOUNT_ID\": \"[^\"]*\"|\"AKTO_ACCOUNT_ID\": \"${AKTO_ACCOUNT_ID}\"|g" wrangler.jsonc
+    GUARDRAILS_MODE="${GUARDRAILS_MODE:-async}"
+    sed -i.bak \
+        -e "s|\"APPLY_AKTO_GUARDRAILS\": \"[^\"]*\"|\"APPLY_AKTO_GUARDRAILS\": \"true\"|g" \
+        -e "s|\"AKTO_GUARDRAILS_MODE\": \"[^\"]*\"|\"AKTO_GUARDRAILS_MODE\": \"${GUARDRAILS_MODE}\"|g" \
+        -e "s|\"AKTO_ACCOUNT_ID\": \"[^\"]*\"|\"AKTO_ACCOUNT_ID\": \"${AKTO_ACCOUNT_ID}\"|g" \
+        wrangler.jsonc
     rm -f wrangler.jsonc.bak
-    ok "APPLY_AKTO_GUARDRAILS=${ENABLE_GUARDRAILS}  AKTO_ACCOUNT_ID=${AKTO_ACCOUNT_ID}"
+    ok "APPLY_AKTO_GUARDRAILS=true  AKTO_GUARDRAILS_MODE=${GUARDRAILS_MODE}  AKTO_ACCOUNT_ID=${AKTO_ACCOUNT_ID}"
 
-    step "4" "Deploying"
+    step "3" "Deploying"
     npx wrangler deploy; ok "akto-cloudflare-proxy deployed ✓"
     cd "$REPO_ROOT"
 }
@@ -246,47 +354,53 @@ header "Akto  ×  Cloudflare  —  Deployment"
 cat <<'BANNER'
   Intercept, analyse, and protect API traffic on Cloudflare Workers.
 
-  Deploying: Full Stack with Guardrails + Discovery
-    - mini-runtime → data-ingestion-service → akto-guardrails-executor
-    - akto-ingest-guardrails → akto-cloudflare-proxy
+  Workers deployed by this script:
+    akto-mini-runtime          — mini-runtime container (traffic to Akto)
+    akto-agent-guard-executor         — agent-guard-executor container (Python scanner)
+    akto-guardrails-executor   — guardrails-service container (policy enforcement)
+    akto-ingest-guardrails     — data-ingestion-service container
+    akto-cloudflare-proxy      — route worker (intercepts traffic)
 
-  Every request is validated against your Akto security policies.
+  Note:
+    akto-agent-guard-executor URL is pre-configured in akto-guardrails-executor/wrangler.jsonc
 
 BANNER
 
-DEPLOY_OPTION="1"
-ENABLE_GUARDRAILS="true"
-ok "Deploying full stack with guardrails and discovery"
-
 check_prereqs
-ask_cloudflare_account_id
-ask_akto_account_id
+_require_cloudflare_account_id
+_require_akto_account_id
 
-# First-time check: are images already in the Cloudflare registry?
+# ── Image push (optional) ─────────────────────────────────────────────────────
 echo ""
 echo -e "  ${BOLD}Push Docker images to Cloudflare registry?${NC}"
-echo "  (If yes, pre-built images will be pulled and pushed.)"
-echo "  (If no, this step is skipped — images are already there.)"
+echo "  Skip if images are already pushed."
 echo ""
-read -rp "  Push images? (y/N): " PUSH_IMAGES
-if [[ "$PUSH_IMAGES" =~ ^[Yy]$ ]]; then
-    # Patch account ID into wrangler.jsonc files before pushing
-    sed -i.bak "s|registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
-        "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc"
-    rm -f "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc.bak"
-    sed -i.bak "s|registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
-        "$REPO_ROOT/workers/akto-guardrails-executor/wrangler.jsonc"
-    rm -f "$REPO_ROOT/workers/akto-guardrails-executor/wrangler.jsonc.bak"
+read -rp "  Push images? (y/N): " PUSH_IMAGES_ANSWER
+if [[ "$PUSH_IMAGES_ANSWER" =~ ^[Yy]$ ]]; then
+    _require_image_tag
 
-    # Pull and push Docker images
-    push_java_images
-    push_worker_images "true"
+    # Patch account ID + image tag into all wrangler.jsonc files
+    for f in \
+        "$REPO_ROOT/workers/akto-guardrails-executor/wrangler.jsonc" \
+        "$REPO_ROOT/workers/akto-mini-runtime/wrangler.jsonc" \
+        "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc" \
+        "$REPO_ROOT/workers/akto-agent-guard-executor/wrangler.jsonc"; do
+        sed -i.bak \
+            -e "s|registry.cloudflare.com/[^/]*/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
+            -e "s|\(registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/[^:\"]*\):[^\"]*\"|\1:${IMAGE_TAG}\"|g" \
+            "$f"
+        rm -f "${f}.bak"
+    done
+
+    push_images
 fi
 
-# Deploy workers
+# ── Deploy all workers ────────────────────────────────────────────────────────
+deploy_mini_runtime
+deploy_agent_guard_executor
 deploy_guardrails_executor
-deploy_ingest_guardrails "Step 2/3"
-deploy_proxy "Step 3/3"
+deploy_ingest_guardrails
+deploy_proxy
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 header "Deployment Complete"
@@ -294,28 +408,24 @@ header "Deployment Complete"
 echo -e "  ${GREEN}${BOLD}✓ All services deployed successfully!${NC}"
 echo ""
 echo "  Traffic flow:"
-echo ""
-echo "    Client request"
-echo "      → Cloudflare Network"
-echo "      → akto-cloudflare-proxy (route rule)"
-echo "      → validates request via akto-ingest-guardrails/guardrails-executor"
-echo "      → forwards to your origin server"
-echo "      ← response to client"
-echo "      ⤷ async: logs traffic → data-ingestion-service → mini-runtime → Akto"
-
+echo "    Client → akto-cloudflare-proxy → origin server"
+echo "           ↳ async: akto-ingest-guardrails (binding)"
+echo "                    → akto-guardrails-executor (binding) → policy check"
+echo "                      → akto-agent-guard-executor (HTTP) → agent-guard-executor"
+echo "                    → akto-mini-runtime (binding) → Akto"
 echo ""
 echo "  Next steps:"
-echo "    1. Verify Cloudflare route is active: dash.cloudflare.com → Workers & Pages → Routes"
+echo "    1. Verify route is active: dash.cloudflare.com → Workers & Pages → Routes"
 echo "    2. Send test traffic to your protected domain"
 echo "    3. Check Akto Dashboard → API Collections for discovered APIs"
 echo "    4. Check Akto Dashboard → Security Policies for guardrails status"
-
 echo ""
 echo "  Monitor logs:"
-echo "    npx wrangler tail akto-cloudflare-proxy    --format pretty"
-echo "    npx wrangler tail akto-ingest-guardrails   --format pretty"
-echo "    npx wrangler tail akto-guardrails-executor --format pretty"
-
+echo "    npx wrangler tail akto-cloudflare-proxy          --format pretty"
+echo "    npx wrangler tail akto-ingest-guardrails         --format pretty"
+echo "    npx wrangler tail akto-guardrails-executor       --format pretty"
+echo "    npx wrangler tail akto-agent-guard-executor             --format pretty"
+echo "    npx wrangler tail akto-mini-runtime              --format pretty"
 echo ""
 echo -e "${GREEN}${BOLD}  Documentation: https://docs.akto.io/traffic-connector/api-gateways/cloudflare${NC}"
 echo ""

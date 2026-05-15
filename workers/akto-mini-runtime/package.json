@@ -1,0 +1,21 @@
+{
+  "name": "akto-mini-runtime",
+  "version": "0.0.1",
+  "description": "Cloudflare Worker for Akto mini-runtime container",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251109.0",
+    "@types/node": "^24.10.0",
+    "typescript": "^5.5.2",
+    "wrangler": "^4.46.0"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.0.30"
+  }
+}

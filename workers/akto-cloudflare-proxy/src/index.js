@@ -1,17 +1,20 @@
 // ─── Akto Cloudflare Proxy ────────────────────────────────────────────────────
 //
 // Transparent proxy that sits in front of your application via a Cloudflare
-// route rule. For every request it:
-//   1. Optionally validates the request through Akto guardrails (blocking)
-//   2. Forwards the request to the origin (fetch passes through to your server)
-//   3. Streams the response back to the client
-//   4. Asynchronously logs the traffic to Akto for API discovery
+// route rule. Supports two guardrails modes:
+//
+//   async (default): proxy → stream response to client →
+//                    ctx.waitUntil(guardrails + ingest via /api/http-proxy)
+//
+//   blocked:         validate request → proxy → validate response + ingest → return
+//                    (returns 400 if request or response is blocked by policy)
 //
 // Required bindings (wrangler.jsonc → services):
 //   AKTO_INGESTION_WORKER   Service binding to the akto-ingest-guardrails worker
 //
 // Environment variables (wrangler.jsonc → vars):
 //   APPLY_AKTO_GUARDRAILS     Enable guardrails. Values: "true" / "false"
+//   AKTO_GUARDRAILS_MODE      "async" (default) or "blocked"
 //   AKTO_ENDPOINTS_TO_GUARD   Optional comma-separated path substrings to guard.
 //                             Leave empty to guard all endpoints.
 //   AKTO_ACCOUNT_ID           Your Akto account ID (default: "1000000")
@@ -32,7 +35,8 @@ export default {
 		}
 
 		const useGuardrails = shouldApplyGuardrails(request, env);
-		console.log(`[Akto Proxy] guardrails=${useGuardrails} for ${request.url}`);
+		const guardrailsMode = (env?.AKTO_GUARDRAILS_MODE || 'async').toLowerCase();
+		console.log(`[Akto Proxy] guardrails=${useGuardrails} mode=${guardrailsMode} for ${request.url}`);
 
 		// Read request body once; reuse bytes for upstream + guardrails + logging
 		let reqBodyText = '';
@@ -45,7 +49,7 @@ export default {
 			requestForFetch = request;
 		}
 
-		// ── Without guardrails: proxy → log ──────────────────────────────────────
+		// ── No guardrails: proxy → stream → async ingest ─────────────────────────
 		if (!useGuardrails) {
 			const response = await fetch(requestForFetch);
 			console.log('[Akto Proxy] Upstream:', response.status);
@@ -59,35 +63,48 @@ export default {
 			return responseForClient;
 		}
 
-		// ── With guardrails: validate request → proxy → log ──────────────────────
+		// ── Async guardrails: proxy → stream → async guardrails+ingest ───────────
+		if (guardrailsMode !== 'blocked') {
+			const response = await fetch(requestForFetch);
+			console.log('[Akto Proxy] Upstream:', response.status);
+
+			const { responseForClient, logPromise } = buildStreamingResponse(response);
+			ctx.waitUntil(
+				logPromise
+					.then((resBody) => runGuardrailsAsync(request, reqBodyText, response, resBody, env))
+					.catch((e) => console.error('[Akto Proxy] async guardrails error:', e)),
+			);
+			return responseForClient;
+		}
+
+		// ── Blocked guardrails: validate request → proxy → validate response ─────
 		if (request.body) {
-			const reqHook = await validateGuardrails(request, reqBodyText, env);
+			const reqHook = await validateGuardrails(request, reqBodyText, env, 'request');
 			if (reqHook.type === 'block') {
 				console.log('[Akto Proxy] Request BLOCKED:', reqHook.reason);
 				return blockedResponse(reqHook.reason);
 			}
 		}
 
-		const requestPayloadSent = reqBodyText;
-
 		const response = await fetch(requestForFetch);
 		console.log('[Akto Proxy] Upstream:', response.status);
 
-		const { responseForClient, logPromise } = buildStreamingResponse(response);
-		ctx.waitUntil(
-			logPromise
-				.then((resBody) => logTraffic(request, requestPayloadSent, response, resBody, env))
-				.catch((e) => console.error('[Akto Proxy] pipe error:', e)),
-		);
+		// Buffer response to validate it before returning to client
+		const resBodyBytes = await response.arrayBuffer();
+		const resBodyText = readBytesAsText(resBodyBytes);
 
-		return responseForClient;
+		// ingest_data=true means the ingest-guardrails worker also forwards to the container
+		const resHook = await validateGuardrails(request, reqBodyText, env, 'response', response, resBodyText);
+		if (resHook.type === 'block') {
+			console.log('[Akto Proxy] Response BLOCKED:', resHook.reason);
+			return blockedResponse(resHook.reason);
+		}
+
+		return new Response(resBodyBytes, response);
 	},
 };
 
 // ─── Streaming response helper ────────────────────────────────────────────────
-// Tees the response body: one copy streams to the client, the other accumulates
-// for async logging. logPromise resolves with the full response body text once
-// the stream is complete.
 function buildStreamingResponse(response) {
 	if (!response.body) {
 		return { responseForClient: response, logPromise: Promise.resolve('') };
@@ -112,8 +129,13 @@ function buildStreamingResponse(response) {
 	return { responseForClient: new Response(readable, response), logPromise };
 }
 
-// ─── Traffic logging ──────────────────────────────────────────────────────────
+// ─── Traffic logging (no-guardrails path) ─────────────────────────────────────
 async function logTraffic(request, reqBody, response, resBody, env, opts = {}) {
+	if (!env.AKTO_INGESTION_WORKER) {
+		console.warn('[Akto Proxy] AKTO_INGESTION_WORKER binding missing — skipping ingest');
+		return;
+	}
+
 	try {
 		const reqContentType = request.headers.get('content-type') || '';
 		const resContentType = response?.headers?.get('content-type') || '';
@@ -126,11 +148,6 @@ async function logTraffic(request, reqBody, response, resBody, env, opts = {}) {
 		}
 
 		const logEntry = buildLogEntry(request, { requestPayload: reqBody, response, responsePayload: resBody, opts }, env);
-
-		if (!env.AKTO_INGESTION_WORKER) {
-			console.warn('[Akto Proxy] AKTO_INGESTION_WORKER binding missing — skipping ingest');
-			return;
-		}
 
 		const resp = await env.AKTO_INGESTION_WORKER.fetch(
 			new Request('https://akto-ingest/api/ingestData', {
@@ -149,29 +166,57 @@ async function logTraffic(request, reqBody, response, resBody, env, opts = {}) {
 	}
 }
 
-// ─── Guardrails ───────────────────────────────────────────────────────────────
-// Calls akto-ingest-guardrails /api/http-proxy?guardrails=true&ingest_data=false
-// with the full traffic log entry (same payload as Kong uses).
-// Returns { type: 'proceed' | 'block' }
-async function validateGuardrails(request, reqBodyText, env) {
+// ─── Async guardrails ─────────────────────────────────────────────────────────
+async function runGuardrailsAsync(request, reqBodyText, response, resBodyText, env) {
 	if (!env.AKTO_INGESTION_WORKER) {
-		console.warn('[Akto Proxy] AKTO_INGESTION_WORKER binding missing — skipping guardrails');
-		return { type: 'proceed' };
+		console.warn('[Akto Proxy] AKTO_INGESTION_WORKER binding missing — skipping async guardrails');
+		return;
 	}
 
-	// Build full log entry (same shape as what logTraffic sends)
-	const logEntry = buildLogEntry(request, { requestPayload: reqBodyText, response: null, responsePayload: '' }, env);
+	const logEntry = buildLogEntry(request, { requestPayload: reqBodyText, response, responsePayload: resBodyText }, env);
 
 	try {
 		const res = await env.AKTO_INGESTION_WORKER.fetch(
-			new Request('https://akto-ingest/api/http-proxy?guardrails=true&akto_connector=cloudflare&ingest_data=false', {
+			new Request('https://akto-ingest/api/http-proxy?guardrails=true&akto_connector=cloudflare&ingest_data=true', {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
 				body: JSON.stringify(logEntry),
 			}),
 		);
 		const text = await res.text();
-		console.log('[Akto Proxy] Guardrails request response:', text.slice(0, 200));
+		const json = JSON.parse(text);
+		const gr = json?.data?.guardrailsResult;
+		console.log(`[Akto Proxy] Async guardrails: allowed=${gr?.Allowed ?? true} reason=${gr?.Reason ?? ''}`);
+	} catch (e) {
+		console.error('[Akto Proxy] Async guardrails error:', e);
+	}
+}
+
+// ─── Blocked-mode guardrails ──────────────────────────────────────────────────
+async function validateGuardrails(request, reqBodyText, env, phase = 'request', response = null, resBodyText = '') {
+	if (!env.AKTO_INGESTION_WORKER) {
+		console.warn('[Akto Proxy] AKTO_INGESTION_WORKER binding missing — skipping guardrails');
+		return { type: 'proceed' };
+	}
+
+	const isResponsePhase = phase === 'response';
+	const ingestData = isResponsePhase ? 'true' : 'false';
+	const logEntry = buildLogEntry(
+		request,
+		{ requestPayload: reqBodyText, response: isResponsePhase ? response : null, responsePayload: isResponsePhase ? resBodyText : '' },
+		env,
+	);
+
+	try {
+		const res = await env.AKTO_INGESTION_WORKER.fetch(
+			new Request(`https://akto-ingest/api/http-proxy?guardrails=true&akto_connector=cloudflare&ingest_data=${ingestData}`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(logEntry),
+			}),
+		);
+		const text = await res.text();
+		console.log(`[Akto Proxy] Guardrails ${phase} response:`, text.slice(0, 200));
 
 		const json = JSON.parse(text);
 		const gr = json?.data?.guardrailsResult;
@@ -205,9 +250,16 @@ function shouldApplyGuardrails(request, env) {
 		.some((needle) => requestPath.includes(needle));
 }
 
-function headersToObject(headers) {
+const HOP_BY_HOP = new Set([
+	'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
+	'te', 'trailer', 'transfer-encoding', 'upgrade', 'accept-encoding',
+]);
+
+function headersToObject(headers, stripHopByHop = false) {
 	const obj = {};
-	headers.forEach((value, key) => { obj[key] = value; });
+	headers.forEach((value, key) => {
+		if (!stripHopByHop || !HOP_BY_HOP.has(key.toLowerCase())) obj[key] = value;
+	});
 	return obj;
 }
 
@@ -219,8 +271,8 @@ function buildLogEntry(request, { requestPayload, response, responsePayload, opt
 	return {
 		path: url.pathname,
 		method: request.method,
-		requestHeaders: JSON.stringify(headersToObject(request.headers)),
-		responseHeaders: hasRes ? JSON.stringify(headersToObject(response.headers)) : '{}',
+		requestHeaders: JSON.stringify(headersToObject(request.headers, true)),
+		responseHeaders: hasRes ? JSON.stringify(headersToObject(response.headers, true)) : '{}',
 		requestPayload: requestPayload || '',
 		responsePayload: responsePayload || '',
 		ip: request.headers.get('cf-connecting-ip') || '127.0.0.1',
@@ -249,14 +301,6 @@ function blockedResponse(reason) {
 		JSON.stringify({ error: 'Request blocked by security policy', reason: reason || '' }),
 		{ status: 400, headers: { 'content-type': 'application/json' } },
 	);
-}
-
-function requestWithBody(request, bodyText) {
-	const headers = new Headers(request.headers);
-	headers.delete('content-length');
-	const init = { method: request.method, headers };
-	if (!['GET', 'HEAD'].includes(request.method)) init.body = bodyText;
-	return new Request(request.url, init);
 }
 
 function readBytesAsText(buf, maxSize = 64 * 1024) {

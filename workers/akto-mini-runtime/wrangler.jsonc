@@ -1,13 +1,12 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "akto-guardrails-executor",
+	"name": "akto-mini-runtime",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-23",
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	"workers_dev": false,
-	"preview_urls": false,
+	"workers_dev": true,
 
 	"observability": {
 		"enabled": true,
@@ -22,19 +21,19 @@
 
 	"containers": [
 		{
-			"name": "akto-guardrails-executor-container",
-			"class_name": "AktoGuardrailsExecutorContainer",
-			"image": "registry.cloudflare.com/YOUR_ACCOUNT_ID/guardrails-service:v1",
+			"name": "akto-mini-runtime-container",
+			"class_name": "AktoMiniRuntimeContainer",
+			"image": "registry.cloudflare.com/YOUR_ACCOUNT_ID/mini-runtime:v1",
 			"instance_type": "standard-2",
-			"max_instances": 5
+			"max_instances": 3
 		}
 	],
 
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "AktoGuardrailsExecutorContainer",
-				"name": "AKTO_GUARDRAILS_EXECUTOR_CONTAINER"
+				"class_name": "AktoMiniRuntimeContainer",
+				"name": "AKTO_MINI_RUNTIME_CONTAINER"
 			}
 		]
 	},
@@ -42,20 +41,17 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"AktoGuardrailsExecutorContainer"
+				"AktoMiniRuntimeContainer"
 			],
 			"tag": "v1"
 		}
 	],
 
 	"vars": {
-		// Public URL of the Akto database abstractor service.
 		"DATABASE_ABSTRACTOR_SERVICE_URL": "https://ultron.akto.io",
-
-		// workers.dev URL of akto-agent-guard-executor — set automatically by deploy.sh.
-		"AGENT_GUARD_ENGINE_URL": "",
-
-		"LOG_LEVEL": "info"
+		"AKTO_INSTANCE_TYPE": "RUNTIME",
+		"RUNTIME_MODE": "hybrid",
+		"MINI_RUNTIME_NAME": "mini-runtime-cf"
 	}
 
 	// Secrets (set via CLI):

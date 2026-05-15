@@ -1,7 +1,3 @@
-/**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
- */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "akto-ingest-guardrails",
@@ -10,79 +6,63 @@
 	"compatibility_flags": [
 		"nodejs_compat"
 	],
-	// Set workers_dev and preview_urls to false when deploying private Workers 
 	"workers_dev": false,
 	"preview_urls": false,
 
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"logs": {
+			"enabled": true,
+			"invocation_logs": true
+		},
+		"traces": {
+			"enabled": true
+		}
 	},
+
 	"containers": [
 		{
-			"class_name": "AktoMiniRuntimeServiceContainer",
-			"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/mrs:v1",
-			"max_instances": 10,
+			"name": "akto-data-ingestion-container",
+			"class_name": "AktoDataIngestionContainer",
+			"image": "registry.cloudflare.com/YOUR_ACCOUNT_ID/data-ingestion-service:v1",
 			"instance_type": "standard-1",
-			"name": "akto-mini-runtime-service-container"
+			"max_instances": 10
 		}
 	],
+
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "AktoMiniRuntimeServiceContainer",
-				"name": "AKTO_MINI_RUNTIME_SERVICE_CONTAINER"
+				"class_name": "AktoDataIngestionContainer",
+				"name": "AKTO_DATA_INGESTION_CONTAINER"
 			}
 		]
 	},
+
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"AktoMiniRuntimeServiceContainer"
+				"AktoDataIngestionContainer"
 			],
 			"tag": "v1"
 		}
 	],
+
 	"services": [
 		{
 			"binding": "AKTO_GUARDRAILS_EXECUTOR",
 			"service": "akto-guardrails-executor"
-		}
-	],
-
-	/**
-	 * KV Namespaces for rate limiting
-	 * To create: wrangler kv namespace create "AKTO_GUARDRAILS_RATE_LIMIT_KV"
-	 * This will generate an ID that you should replace in the "id" field below
-	 */
-	/**
-	"kv_namespaces": [
+		},
 		{
-			"binding": "AKTO_GUARDRAILS_RATE_LIMIT_KV",
-			"id": "<GENERATED_KV_ID>"
+			"binding": "AKTO_MINI_RUNTIME_WORKER",
+			"service": "akto-mini-runtime"
 		}
 	],
-	*/
 
-	/**
-	 * Environment Variables
-	 */
 	"vars": {
-		"DATABASE_ABSTRACTOR_SERVICE_URL": "https://cyborg.akto.io",
-		"THREAT_BACKEND_URL": "https://tbs.akto.io",
 		"ENABLE_MCP_GUARDRAILS": "true"
 	}
 
-	/**
-	 * Note: Secrets should be set via CLI:
-	 * wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN
-	 * wrangler secret put THREAT_BACKEND_TOKEN
-	 *
-	 * KV Namespace Setup:
-	 * 1. Run: wrangler kv:namespace create "AKTO_GUARDRAILS_RATE_LIMIT_KV"
-	 * 2. Copy the generated ID into the "id" field in kv_namespaces above
-	 * 3. For preview: wrangler kv:namespace create "AKTO_GUARDRAILS_RATE_LIMIT_KV" --preview
-	 *
-	 * Feature Flags:
-	 * ENABLE_MCP_GUARDRAILS: Set to "true" to enable MCP guardrails validation, "false" to disable
-	 */
+	// Secrets (set via CLI):
+	//   wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN
 }

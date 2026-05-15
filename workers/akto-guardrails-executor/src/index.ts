@@ -1,124 +1,75 @@
-import { Container, getContainer } from "@cloudflare/containers";
+import { Container } from "@cloudflare/containers";
 import { Hono } from "hono";
-import { replicateRequest } from "./utils/request-utils";
-
-/**
- * Akto Agent Guard Executor Cloudflare Worker
- *
- * This worker handles Python-based security scanning and execution at the edge.
- * It uses Durable Objects with Container bindings to manage the Python service.
- */
 
 type Environment = {
   readonly AKTO_GUARDRAILS_EXECUTOR_CONTAINER: DurableObjectNamespace<AktoGuardrailsExecutorContainer>;
-}
+  readonly DATABASE_ABSTRACTOR_SERVICE_URL: string;
+  readonly DATABASE_ABSTRACTOR_SERVICE_TOKEN: string;
+  readonly AGENT_GUARD_ENGINE_URL?: string;
+  readonly LOG_LEVEL?: string;
+};
 
-/**
- * Durable Object with Container binding
- * The container runs the Python service defined in the Dockerfile
- */
 export class AktoGuardrailsExecutorContainer extends Container {
-  defaultPort = 8092; // pass requests to port 8092 in the container
-  sleepAfter = "2h"; // Keep container alive for 2 hours
+  defaultPort = 8080;
+  sleepAfter = "2h";
 
-  // Pass environment variables to the container
-  envVars = {
-    PYTHONUNBUFFERED: "1",
-    PORT: "8092",
-    HF_HOME: "/app/.cache/huggingface"
-  };
+  private workerEnv: any;
 
-  override onStart() {
-    console.log(`[Container Init] Akto Agent Guard Executor Container started - Time: ${new Date().toISOString()}`);
+  constructor(state: any, env: any) {
+    super(state, env);
+    this.workerEnv = env;
   }
 
-  override onStop() {
-    console.log(`[Container Stop] Akto Agent Guard Executor Container stopped - Time: ${new Date().toISOString()}`);
+  override async fetch(request: Request): Promise<Response> {
+    this.envVars = {
+      DATABASE_ABSTRACTOR_SERVICE_URL: this.workerEnv.DATABASE_ABSTRACTOR_SERVICE_URL,
+      DATABASE_ABSTRACTOR_SERVICE_TOKEN: this.workerEnv.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "",
+      AGENT_GUARD_ENGINE_URL: this.workerEnv.AGENT_GUARD_ENGINE_URL || "",
+      LOG_LEVEL: this.workerEnv.LOG_LEVEL || "info",
+    };
+
+    try {
+      await this.startAndWaitForPorts(this.defaultPort, {
+        portReadyTimeoutMS: 120000,
+        instanceGetTimeoutMS: 120000,
+      });
+      return await super.fetch(request);
+    } catch (error) {
+      console.error("[Guardrails Container] Fetch error:", error);
+      return new Response(JSON.stringify({ error: "Container startup failed", details: String(error) }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   }
 
-  override onError(error: unknown) {
-    console.error(`[Container Error] Akto Agent Guard Executor Container error:`, error);
-  }
+  override onStart() { console.log("[Guardrails Container] Started"); }
+  override onStop()  { console.log("[Guardrails Container] Stopped"); }
+  override onError(error: unknown) { console.error("[Guardrails Container] Error:", error); }
 }
 
-// Create Hono app with proper typing for Cloudflare Workers
-const app = new Hono<{
-  Bindings: Environment;
-}>();
+const app = new Hono<{ Bindings: Environment }>();
 
-// Home route
-app.get("/", (c) => {
-  return c.json({
-    service: 'Akto Agent Guard Executor Worker',
-    version: '1.0.0',
-  });
-});
-
-// Health check endpoint
-app.get("/health", (c) => {
-  return c.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-  });
-});
+app.get("/health", (c) => c.json({ status: "healthy", timestamp: new Date().toISOString() }));
 
 export default {
   async fetch(request: Request, env: Environment, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Handle root and health via Hono
-    if (url.pathname === '/' || url.pathname === '/health') {
+    if (url.pathname === "/health") {
       return app.fetch(request, env, ctx);
     }
 
-    // All other requests go to the container
+    // Forward all requests to the guardrails-service container (single instance)
     try {
-      console.log('[Execute Request] Received execution request');
-
-      // Try to extract scanner_name from request body for instance routing
-      let scannerName = 'default-executor';
-      let requestToForward = request;
-
-      try {
-        if (request.method === 'POST' && request.headers.get('content-type')?.includes('application/json')) {
-          // Replicate request to read body and forward independently
-          const [requestForReading, requestForForwarding] = await replicateRequest(request);
-          requestToForward = requestForForwarding;
-
-          const body = await requestForReading.json() as any;
-          scannerName = body.scanner_name || scannerName;
-        }
-      } catch (e) {
-        // If body parsing fails, use default scanner name
-      }
-
-      // Use scanner_name as the instance ID for consistent routing
-      // This ensures requests for the same scanner go to the same container instance
-      const stub = getContainer(env.AKTO_GUARDRAILS_EXECUTOR_CONTAINER, scannerName);
-      console.log(`[Execute Request] Got container stub for scanner: ${scannerName}`);
-
-      // Start container and wait for it to be ready before forwarding requests
-      // This ensures sleepAfter behavior works correctly
-      console.log('[Execute Request] Starting container and waiting for ports...');
-      const startTime = Date.now();
-      await stub.startAndWaitForPorts();
-      const startDuration = Date.now() - startTime;
-      console.log(`[Execute Request] Container started and ports ready in ${startDuration}ms`);
-
-      // Forward the request to the Durable Object (which will forward to the container)
-      const response = await stub.fetch(requestToForward);
-      console.log(`[Execute Request] Response status: ${response.status}`);
-      return response;
+      const containerId = env.AKTO_GUARDRAILS_EXECUTOR_CONTAINER.idFromName("main");
+      const container = env.AKTO_GUARDRAILS_EXECUTOR_CONTAINER.get(containerId);
+      return await container.fetch(request);
     } catch (error) {
-      console.error('[Execute Request] Error:', error);
-      return new Response(JSON.stringify({
-        error: 'Failed to process execution request',
-        message: error instanceof Error ? error.message : 'Unknown error',
-      }), {
-        status: 500,
-        headers: {
-          'Content-Type': 'application/json',
-        },
+      console.error("[Guardrails Executor] Error:", error);
+      return new Response(JSON.stringify({ error: "Guardrails service unavailable", details: String(error) }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
       });
     }
   },

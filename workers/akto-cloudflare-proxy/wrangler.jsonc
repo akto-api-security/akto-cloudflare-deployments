@@ -3,29 +3,41 @@
 	"name": "akto-cloudflare-proxy",
 	"main": "src/index.js",
 	"compatibility_date": "2025-06-23",
+
 	"observability": {
+		"enabled": true,
+		"logs": {
+		"enabled": true,
+		"invocation_logs": true
+		},
+		"traces": {
 		"enabled": true
+		}
 	},
 
 	"services": [
 		{
 			// akto-ingest-guardrails must be deployed before this worker.
-			// Handles both traffic ingestion (/api/ingestData) and guardrails
-			// validation (/api/validate/request, /api/validate/response).
+			// Handles traffic ingestion (/api/ingestData) and guardrails (/api/http-proxy).
 			"binding": "AKTO_INGESTION_WORKER",
 			"service": "akto-ingest-guardrails"
 		}
 	],
 
 	"vars": {
-		// Set to "true" to enable request guardrails (blocking + redaction).
-		// Requires akto-guardrails-executor to be deployed first.
+		// Set to "true" to enable guardrails. Requires akto-ingest-guardrails deployed.
 		"APPLY_AKTO_GUARDRAILS": "true",
+
+		// Guardrails mode: "async" (default) or "blocked".
+		//   async:   proxy first, run guardrails+ingest after response is sent (non-blocking)
+		//   blocked: validate request, proxy, validate response — returns 400 if blocked
+		"AKTO_GUARDRAILS_MODE": "async",
 
 		// Optional: comma-separated path substrings to apply guardrails on.
 		// Leave empty to guard all endpoints. Example: "/api/chat,/api/completions"
 		"AKTO_ENDPOINTS_TO_GUARD": "",
 
+		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
 		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
 		"AKTO_ACCOUNT_ID": "1000000"
 	},
@@ -33,8 +45,8 @@
 	"routes": [
 		{
 			// Update to match your domain — e.g., "api.yourdomain.com/*"
-			"pattern": "api.yourdomain.com/*",
-			"zone_name": "yourdomain.com"
+			"pattern": "example.com/*",
+			"zone_name": "example.com"
 		}
 	]
 }
