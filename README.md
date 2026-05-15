@@ -1,227 +1,261 @@
 # Akto × Cloudflare
 
-Intercept, analyse, and protect API traffic entirely on Cloudflare Workers + Containers, with backend API discovery and traffic processing in mini-runtime.
+Deploy Akto on Cloudflare Workers to automatically capture API traffic, discover endpoints, and enforce security policies — with no changes to your existing code.
+
+---
 
 ## How it works
 
-Deploy the complete Akto Cloudflare stack: transparent proxy worker + traffic ingest + guardrails + backend API discovery. No changes to your existing code required.
-
 ```
 Client Request
-  → Cloudflare Network (route rule)
-      → akto-cloudflare-proxy Worker
-          ├─ validate request → akto-ingest-guardrails Worker (sync)
-          ├─ fetch(request)   → your existing worker / origin
-          └─ async: log traffic
-              → data-ingestion-service → mini-runtime
-                  → parse & discover APIs → Akto Dashboard
-  ← response to client
+  → Cloudflare (route rule)
+      → akto-cloudflare-proxy
+          ├── forwards request → your origin / worker
+          └── async (fire-and-forget, no latency added)
+              → akto-ingest-guardrails
+                  ├── akto-guardrails-executor → akto-nginx-service  (security scanning)
+                  └── akto-mini-runtime                              (API discovery → Akto Dashboard)
+  ← Response to client
 ```
 
-## Architecture
-
-| Component | Role | Type |
-|---|---|---|
-| **akto-cloudflare-proxy** | Transparent proxy, traffic capture | Cloudflare Worker (JavaScript) |
-| **akto-ingest-guardrails** | Request validation, traffic routing | Cloudflare Worker + Durable Object (TypeScript + MRS container) |
-| **akto-guardrails-executor** | Security policy enforcement | Cloudflare Container (Python) |
-| **data-ingestion-service** | HTTP traffic intake, Kafka→HTTP bridge | Cloudflare Container (Java/Jetty WAR) |
-| **mini-runtime** | API discovery, catalog sync, threat detection | Cloudflare Container (Java) |
-
----
-
-## Full Stack Deployment
-
-Every request is validated against your Akto security policies. APIs discovered and monitored continuously.
-
-**Services to deploy (in order):**
-1. **Java backends** (pre-built, pulled from Docker Hub + pushed to Cloudflare registry):
-   - `mini-runtime` (aktosecurity/mini-runtime:local) — API discovery, catalog sync
-   - `data-ingestion-service` (aktosecurity/data-ingestion-service:latest) — HTTP traffic intake
-2. **Cloudflare Workers**:
-   - `akto-guardrails-executor` — security scanning in container
-   - `akto-ingest-guardrails` — request validation + traffic routing
-   - `akto-cloudflare-proxy` — transparent proxy
-
----
-
-## Quick Start
-
-### Prerequisites
-
-- **Node.js** v18+ — for Wrangler CLI
-- **Docker** — for pulling and pushing container images
-- **wrangler login** — authenticate with Cloudflare
-
-### Deploy Everything
-
-```bash
-./deploy.sh
-```
-
-The script will ask you:
-1. Cloudflare Account ID
-2. Akto Account ID
-3. Push images? (if yes, pulls and pushes Docker images from Docker Hub)
-4. Cloudflare route pattern (e.g., `api.yourdomain.com/*`)
-5. Akto API tokens for ingest authentication
-
-Deploys everything in the correct order with guardrails and API discovery. First-time setup takes 5-10 minutes (Docker image pull + deployment); subsequent deploys are instant.
+All traffic analysis happens asynchronously after the response is sent, so there is **zero added latency** to your users.
 
 ---
 
 ## Services
 
-### Cloudflare Workers
-
-| Worker | Role | Language |
+| Worker | Container | Role |
 |---|---|---|
-| `akto-cloudflare-proxy` | Route-based transparent proxy. Captures traffic, optionally validates via guardrails, logs asynchronously. | JavaScript |
-| `akto-ingest-guardrails` | Receives logged traffic, manages Durable Object for MRS container, routes to `data-ingestion-service`. | TypeScript |
-| `akto-guardrails-executor` | Runs security policy scanning (LLM/regex). Required only for Option 1. | Python (container) |
+| `akto-cloudflare-proxy` | — | Transparent proxy. Captures all traffic and forwards it asynchronously. |
+| `akto-ingest-guardrails` | `data-ingestion-service` | Receives traffic, routes to scanner and mini-runtime. |
+| `akto-guardrails-executor` | `guardrails-service` | Runs security policy checks. |
+| `akto-nginx-service` | `agent-guard-executor` | Python ML service for API threat detection. |
+| `akto-mini-runtime` | `mini-runtime` | Discovers API endpoints and syncs them to Akto Dashboard. |
 
-### Java Backend Services
+### How workers connect
 
-| Service | Role | Deployment |
-|---|---|---|
-| `mini-runtime` | Main API discovery & catalog sync engine. Parses traffic, detects endpoints, syncs to MongoDB. | Cloudflare Container (Java) |
-| `data-ingestion-service` | HTTP traffic intake endpoint. Bridges Kafka and HTTP protocols. Receives from proxy, forwards to mini-runtime. | Cloudflare Container (Java/Jetty) |
+```
+akto-cloudflare-proxy  →  akto-ingest-guardrails   (service binding)
+akto-ingest-guardrails →  akto-guardrails-executor  (service binding)
+akto-ingest-guardrails →  akto-mini-runtime         (service binding)
+akto-guardrails-executor → akto-nginx-service       (HTTP)
+```
 
 ---
 
 ## Container Images
 
-The deployment uses the following container images:
+All images are pulled from DockerHub — no local builds needed.
 
-| Component | Image | Version | Source |
-|---|---|---|---|
-| **Mini-runtime** | `aktosecurity/mini-runtime` | `local` | Public Docker Hub |
-| **Data-ingestion-service** | `aktosecurity/data-ingestion-service` | `latest` | Public Docker Hub |
-| **MRS (Mini Runtime Service)** | `registry.cloudflare.com/<account-id>/mrs` | `v1` | Built from MRS container |
-| **Guardrails Executor** | `aktosecurity/akto-agent-guard-executor` | `local` | Public Docker Hub |
-
-**Note:** All images are pulled from the public Docker Hub registry (`aktosecurity/`) except MRS which is built as part of the deployment.
+| Worker | DockerHub Image |
+|---|---|
+| `akto-mini-runtime` | `aktosecurity/mini-runtime:local` |
+| `akto-ingest-guardrails` | `aktosecurity/data-ingestion-service:latest` |
+| `akto-guardrails-executor` | `aktosecurity/akto-guardrails-service:local` |
+| `akto-nginx-service` | `aktosecurity/akto-agent-guard-executor:local` |
 
 ---
 
-## Testing
+## Prerequisites
 
-After deployment, verify the end-to-end flow:
+- **Node.js** v18+ and **npm**
+- **Docker** (to push images to Cloudflare registry)
+- **Wrangler CLI** authenticated: `npx wrangler login`
+- An **Akto account** — [sign up at akto.io](https://www.akto.io)
+- Your domain must be on **Cloudflare** (for the route rule)
+
+---
+
+## Deploy
+
+### 1. Configure
+
+Copy the example env file and fill in your values:
 
 ```bash
-# 1. Check Cloudflare workers are deployed
-npx wrangler deployments list akto-cloudflare-proxy
-
-# 2. Monitor proxy logs
-npx wrangler tail akto-cloudflare-proxy --format pretty
-
-# 3. Send test traffic
-curl -X GET "https://api.yourdomain.com/api/test"
-
-# 4. Check Akto Dashboard → API Collections (wait 30-60 sec for sync)
+cp .env.example .env
 ```
+
+Edit `.env`:
+
+```bash
+CLOUDFLARE_ACCOUNT_ID=   # dash.cloudflare.com → Overview → Account ID
+AKTO_ACCOUNT_ID=         # Akto Dashboard → Settings → Account
+AKTO_API_TOKEN=          # Akto Dashboard → Quick Start → Hybrid SaaS → Copy Token
+ROUTE_PATTERN=           # e.g. api.yourdomain.com/*
+IMAGE_TAG=v1             # version tag for images pushed to Cloudflare registry
+```
+
+### 2. Run the deployment script
+
+```bash
+./deploy.sh
+```
+
+The script will:
+1. Ask whether to push Docker images to your Cloudflare registry (required on first run)
+2. Deploy all 5 workers in the correct order
+3. Set secrets automatically
+4. Auto-detect and configure the internal service URLs
+
+First run takes ~10 minutes (image push). Subsequent deploys take ~1 minute.
 
 ---
 
 ## Manual Deployment
 
-### Pull Pre-built Container Images
+If you prefer not to use `deploy.sh`, follow these steps.
+
+### Step 1 — Push images to Cloudflare registry
+
+Cloudflare Workers can only pull images from `registry.cloudflare.com`. You need to pull each image from DockerHub, re-tag it for your account, and push it once.
 
 ```bash
-# Pull mini-runtime
-docker pull aktosecurity/mini-runtime:local
+ACCOUNT=<your-cloudflare-account-id>
+TAG=v1
 
-# Pull data-ingestion-service
-docker pull aktosecurity/data-ingestion-service:latest
+# Pull from DockerHub
+docker pull --platform linux/amd64 aktosecurity/mini-runtime:local
+docker pull --platform linux/amd64 aktosecurity/data-ingestion-service:latest
+docker pull --platform linux/amd64 aktosecurity/akto-guardrails-service:local
+docker pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
+
+# Re-tag and push to Cloudflare registry
+# Note: use docker buildx (not plain docker tag) to preserve the linux/amd64 platform metadata
+
+for entry in \
+    "aktosecurity/mini-runtime:local=mini-runtime" \
+    "aktosecurity/data-ingestion-service:latest=data-ingestion-service" \
+    "aktosecurity/akto-guardrails-service:local=guardrails-service" \
+    "aktosecurity/akto-agent-guard-executor:local=nginx-service"; do
+  src="${entry%%=*}"
+  name="${entry##*=}"
+  dst="registry.cloudflare.com/${ACCOUNT}/${name}:${TAG}"
+  echo "FROM $src" | docker buildx build --platform linux/amd64 --provenance=false --load -t "$dst" -
+  npx wrangler containers push "$dst"
+done
 ```
 
-### Deploy Cloudflare Workers
+### Step 2 — Update wrangler.jsonc files
 
-```bash
-# Option 1 (with guardrails)
-cd workers/akto-guardrails-executor  && npm install && npx wrangler deploy
-cd workers/akto-ingest-guardrails    && npm install && npx wrangler deploy
-cd workers/akto-cloudflare-proxy     && npm install && npx wrangler deploy
+In each worker's `wrangler.jsonc`, replace `YOUR_ACCOUNT_ID` with your Cloudflare account ID and set the correct image tag:
 
-# Option 2 (ingestion only)
-cd workers/akto-ingest-guardrails    && npm install && npx wrangler deploy
-cd workers/akto-cloudflare-proxy     && npm install && npx wrangler deploy
+```
+workers/akto-mini-runtime/wrangler.jsonc
+workers/akto-ingest-guardrails/wrangler.jsonc
+workers/akto-guardrails-executor/wrangler.jsonc
+workers/akto-nginx-service/wrangler.jsonc
 ```
 
-### Set Worker Secrets
+Example (in each file):
+```jsonc
+"image": "registry.cloudflare.com/<your-account-id>/mini-runtime:v1"
+```
+
+Also set your Akto account ID and route in `workers/akto-cloudflare-proxy/wrangler.jsonc`:
+```jsonc
+"AKTO_ACCOUNT_ID": "<your-akto-account-id>",
+...
+"pattern": "api.yourdomain.com/*",
+"zone_name": "yourdomain.com"
+```
+
+And set the nginx-service URL in `workers/akto-guardrails-executor/wrangler.jsonc` — you'll get this after deploying `akto-nginx-service` in step 3:
+```jsonc
+"AGENT_GUARD_ENGINE_URL": "https://akto-nginx-service.<your-subdomain>.workers.dev"
+```
+
+### Step 3 — Deploy workers in order
+
+Workers must be deployed in this order because each one depends on the previous:
 
 ```bash
-# In akto-ingest-guardrails directory:
+# 1. mini-runtime
+cd workers/akto-mini-runtime
+npm install
 npx wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN
-npx wrangler secret put THREAT_BACKEND_TOKEN
+npx wrangler deploy
+
+# 2. agent-guard-executor — note the deployed URL in the output (you'll need it for step 3)
+cd ../akto-nginx-service
+npm install
+npx wrangler deploy
+
+# 3. guardrails-executor — paste the nginx-service URL from step 2 into wrangler.jsonc first
+cd ../akto-guardrails-executor
+npm install
+npx wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN
+npx wrangler deploy
+
+# 4. ingest-guardrails
+cd ../akto-ingest-guardrails
+npm install
+npx wrangler deploy
+
+# 5. cloudflare-proxy (must be last — binds to ingest-guardrails)
+cd ../akto-cloudflare-proxy
+npm install
+npx wrangler deploy
 ```
 
-### akto-cloudflare-proxy Configuration
+The `DATABASE_ABSTRACTOR_SERVICE_TOKEN` is your Akto API token from:
+**Akto Dashboard → Quick Start → Hybrid SaaS → Connect → Copy Token**
 
-Edit `workers/akto-cloudflare-proxy/wrangler.jsonc`:
+---
+
+## Configuration
+
+### Enable / disable guardrails
+
+In `workers/akto-cloudflare-proxy/wrangler.jsonc`:
 
 ```jsonc
-"vars": {
-  "APPLY_AKTO_GUARDRAILS": "false",      // "true" to enable guardrails
-  "AKTO_ENDPOINTS_TO_GUARD": "",         // empty = all endpoints, or "/api/auth,/api/admin"
-  "AKTO_ACCOUNT_ID": "1000000"           // Your Akto account ID
-},
-"routes": [
-  {
-    "pattern": "api.yourdomain.com/*",   // Your domain (must be in Cloudflare)
-    "zone_name": "yourdomain.com"        // Cloudflare zone
-  }
-]
+"APPLY_AKTO_GUARDRAILS": "true",    // "false" to disable (API discovery still works)
+"AKTO_GUARDRAILS_MODE": "async",    // "blocked" to reject requests that fail policy
+"AKTO_ENDPOINTS_TO_GUARD": "",      // "" = all endpoints, or "/api/chat,/api/auth"
+```
+
+### Mini-runtime name
+
+In `workers/akto-mini-runtime/wrangler.jsonc`, set `MINI_RUNTIME_NAME` to identify this deployment in your Akto Dashboard:
+
+```jsonc
+"MINI_RUNTIME_NAME": "mini-runtime-cf"
 ```
 
 ---
 
-## Monitoring
-
-### Cloudflare Worker Logs
+## Monitor logs
 
 ```bash
-# Proxy worker (traffic capture)
-npx wrangler tail akto-cloudflare-proxy --format pretty
-
-# Ingest guardrails worker (traffic routing)
-npx wrangler tail akto-ingest-guardrails --format pretty
-
-# Executor worker (security scanning, if Option 1)
-npx wrangler tail akto-guardrails-executor --format pretty
+npx wrangler tail akto-cloudflare-proxy          --format pretty
+npx wrangler tail akto-ingest-guardrails         --format pretty
+npx wrangler tail akto-guardrails-executor       --format pretty
+npx wrangler tail akto-nginx-service             --format pretty
+npx wrangler tail akto-mini-runtime              --format pretty
 ```
 
-### Akto Dashboard
+---
 
-1. **API Collections** — discovered endpoints, request/response patterns
-2. **API Changes** — daily monitoring and change detection
-3. **Security Policies** — guardrails status, blocked requests (if Option 1)
-4. **Traffic Analytics** — request volume, response times, error rates
+## Troubleshooting
 
-### Troubleshooting
+**No traffic in Akto Dashboard?**
+- Check the route rule is active: Cloudflare Dashboard → Workers & Pages → Routes
+- Tail `akto-cloudflare-proxy` logs and send a test request to your domain
+- Wait 30–60 seconds after the first request for the sync
 
-**No traffic reaching proxy?**
-- Check route rule is active: Cloudflare Dashboard → Workers & Pages → Routes
-- Verify domain is in Cloudflare account
-- Check route pattern matches your domain (e.g., `api.example.com/*`)
+**Container stuck starting (port not ready error)?**
+- A container needs a full restart to pick up new env vars
+- Delete the container app via the Cloudflare API, then redeploy the worker — it will re-create on the next request
 
-**APIs not appearing in Akto?**
-- Verify proxy logs show traffic: `npx wrangler tail akto-cloudflare-proxy`
-- Check ingest worker received data: `npx wrangler tail akto-ingest-guardrails`
-- Wait 30-60 seconds for sync
-- Verify Akto account ID is correct
-
-**Guardrails not working?**
-- Check `APPLY_AKTO_GUARDRAILS: "true"` in proxy config
-- Redeploy proxy: `cd workers/akto-cloudflare-proxy && npx wrangler deploy`
-- Check guardrails executor logs
-
-**See:** [TESTING_GUIDE.md](TESTING_GUIDE.md) for detailed troubleshooting
+**Guardrails not running?**
+- Confirm `APPLY_AKTO_GUARDRAILS: "true"` in the proxy config
+- Check `akto-guardrails-executor` logs for errors
 
 ---
 
 ## Support
 
-- Akto Dashboard in-app chat
-- [Discord](https://www.akto.io/community)
+- [Akto Documentation](https://docs.akto.io)
+- [Discord Community](https://www.akto.io/community)
 - help@akto.io
