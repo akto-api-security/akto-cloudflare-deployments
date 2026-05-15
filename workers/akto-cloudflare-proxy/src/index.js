@@ -61,15 +61,10 @@ export default {
 
 		// ── With guardrails: validate request → proxy → log ──────────────────────
 		if (request.body) {
-			const reqHook = await validateGuardrails('request', reqBodyText, env);
+			const reqHook = await validateGuardrails(request, reqBodyText, env);
 			if (reqHook.type === 'block') {
 				console.log('[Akto Proxy] Request BLOCKED:', reqHook.reason);
 				return blockedResponse(reqHook.reason);
-			}
-			if (reqHook.type === 'modified') {
-				console.log('[Akto Proxy] Request payload redacted by guardrails');
-				reqBodyText = reqHook.modifiedPayload;
-				requestForFetch = requestWithBody(request, reqBodyText);
 			}
 		}
 
@@ -155,46 +150,39 @@ async function logTraffic(request, reqBody, response, resBody, env, opts = {}) {
 }
 
 // ─── Guardrails ───────────────────────────────────────────────────────────────
-// Calls akto-ingest-guardrails /api/validate/{phase} via service binding.
-// Returns { type: 'proceed' | 'block' | 'modified', modifiedPayload?, reason? }
-async function validateGuardrails(phase, requestPayload, env) {
+// Calls akto-ingest-guardrails /api/http-proxy?guardrails=true&ingest_data=false
+// with the full traffic log entry (same payload as Kong uses).
+// Returns { type: 'proceed' | 'block' }
+async function validateGuardrails(request, reqBodyText, env) {
 	if (!env.AKTO_INGESTION_WORKER) {
 		console.warn('[Akto Proxy] AKTO_INGESTION_WORKER binding missing — skipping guardrails');
 		return { type: 'proceed' };
 	}
 
-	let gr = { allowed: true, modified: false };
+	// Build full log entry (same shape as what logTraffic sends)
+	const logEntry = buildLogEntry(request, { requestPayload: reqBodyText, response: null, responsePayload: '' }, env);
+
 	try {
 		const res = await env.AKTO_INGESTION_WORKER.fetch(
-			new Request(`https://akto-ingest/api/validate/${phase}`, {
+			new Request('https://akto-ingest/api/http-proxy?guardrails=true&akto_connector=cloudflare&ingest_data=false', {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' },
-				// akto-ingest-guardrails expects { payload: string }
-				body: JSON.stringify({ payload: requestPayload }),
+				body: JSON.stringify(logEntry),
 			}),
 		);
 		const text = await res.text();
-		console.log(`[Akto Proxy] Guardrails ${phase} response:`, text.slice(0, 200));
-		try {
-			gr = JSON.parse(text);
-		} catch {
-			console.warn('[Akto Proxy] Non-JSON guardrails response:', res.status);
-		}
+		console.log('[Akto Proxy] Guardrails request response:', text.slice(0, 200));
+
+		const json = JSON.parse(text);
+		const gr = json?.data?.guardrailsResult;
+		const allowed = gr?.Allowed ?? true;
+		const reason  = gr?.Reason  ?? '';
+
+		if (!allowed) return { type: 'block', reason };
 	} catch (e) {
 		console.error('[Akto Proxy] Guardrails fetch error:', e);
-		return { type: 'proceed' };
 	}
 
-	// Normalize: akto-ingest-guardrails returns lowercase; some backends use capital letters
-	const allowed     = gr?.Allowed     ?? gr?.allowed     ?? true;
-	const modified    = gr?.Modified    ?? gr?.modified    ?? false;
-	const modPayload  = gr?.ModifiedPayload ?? gr?.modifiedPayload;
-	const reason      = gr?.Reason      ?? gr?.reason      ?? '';
-
-	if (!allowed) return { type: 'block', reason };
-	if (modified && modPayload != null && String(modPayload).length > 0) {
-		return { type: 'modified', modifiedPayload: String(modPayload) };
-	}
 	return { type: 'proceed' };
 }
 
@@ -217,26 +205,42 @@ function shouldApplyGuardrails(request, env) {
 		.some((needle) => requestPath.includes(needle));
 }
 
+function headersToObject(headers) {
+	const obj = {};
+	headers.forEach((value, key) => { obj[key] = value; });
+	return obj;
+}
+
 function buildLogEntry(request, { requestPayload, response, responsePayload, opts = {} }, env) {
 	const url = new URL(request.url);
 	const hasRes = response != null;
+	const statusCode = hasRes ? String(response.status) : '0';
+	const tag = JSON.stringify({ 'gen-ai': 'Gen AI', 'mcp-server': 'MCP Server', source: 'cloudflare' });
 	return {
 		path: url.pathname,
 		method: request.method,
-		requestHeaders: JSON.stringify(Object.fromEntries(request.headers)),
-		responseHeaders: hasRes ? JSON.stringify(Object.fromEntries(response.headers)) : '{}',
-		requestPayload,
-		responsePayload,
+		requestHeaders: JSON.stringify(headersToObject(request.headers)),
+		responseHeaders: hasRes ? JSON.stringify(headersToObject(response.headers)) : '{}',
+		requestPayload: requestPayload || '',
+		responsePayload: responsePayload || '',
 		ip: request.headers.get('cf-connecting-ip') || '127.0.0.1',
+		destIp: '127.0.0.1',
 		time: Math.floor(Date.now() / 1000).toString(),
-		statusCode: hasRes ? String(response.status) : '0',
+		statusCode,
 		type: opts.isWebSocket ? 'WebSocket' : 'HTTP/1.1',
-		status: hasRes ? (response.statusText || 'OK') : '',
+		status: statusCode,
 		akto_account_id: env?.AKTO_ACCOUNT_ID || '1000000',
 		akto_vxlan_id: '0',
 		is_pending: 'false',
 		source: 'MIRRORING',
-		tag: JSON.stringify({ service: 'cloudflare', 'gen-ai': 'Gen AI' }),
+		direction: null,
+		process_id: null,
+		socket_id: null,
+		daemonset_id: null,
+		enabled_graph: null,
+		tag,
+		metadata: tag,
+		contextSource: 'AGENTIC',
 	};
 }
 

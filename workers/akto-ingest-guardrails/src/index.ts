@@ -165,6 +165,67 @@ app.get("/lb", async (c) => {
   return await container.fetch(c.req.raw);
 });
 
+// Kong-compatible unified endpoint used by akto-cloudflare-proxy and Kong plugin.
+// Query params:
+//   guardrails=true        — run guardrails validation (controlled by ENABLE_MCP_GUARDRAILS)
+//   ingest_data=true       — forward traffic to mini-runtime container
+//   akto_connector=<name>  — source identifier (informational)
+// Body: single IngestDataBatch item (flat, not wrapped in batchData)
+// Response: { data: { guardrailsResult: { Allowed: bool, Reason: string } } }
+app.post("/api/http-proxy", async (c) => {
+  const guardrails = c.req.query("guardrails") === "true";
+  const ingestData = c.req.query("ingest_data") === "true";
+
+  const batchItem = await c.req.json<IngestDataBatch>();
+
+  const dbUrl = c.env.DATABASE_ABSTRACTOR_SERVICE_URL || "https://cyborg.akto.io";
+  const dbToken = c.env.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "";
+  const tbsHost = c.env.THREAT_BACKEND_URL || "https://tbs.akto.io";
+  const tbsToken = c.env.THREAT_BACKEND_TOKEN || "";
+
+  let guardrailsAllowed = true;
+  let guardrailsReason = "";
+
+  if (c.env.ENABLE_MCP_GUARDRAILS === "true" && guardrails) {
+    const results = await handleBatchValidation([batchItem], {
+      dbUrl,
+      dbToken,
+      modelExecutorBinding: c.env.AKTO_GUARDRAILS_EXECUTOR,
+      tbsHost,
+      tbsToken,
+      executionCtx: c.executionCtx,
+      rateLimitKV: c.env.AKTO_GUARDRAILS_RATE_LIMIT_KV,
+    });
+
+    const result = results[0];
+    if (result && !result.requestAllowed) {
+      guardrailsAllowed = false;
+      guardrailsReason = result.requestReason || "Request blocked by guardrails";
+    } else if (result && !result.responseAllowed) {
+      guardrailsAllowed = false;
+      guardrailsReason = result.responseReason || "Response blocked by guardrails";
+    }
+  }
+
+  if (ingestData) {
+    const ingestReq = new Request("https://akto-ingest/api/ingestData", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ batchData: [batchItem] }),
+    });
+    await forwardToContainer(ingestReq, c.env);
+  }
+
+  return c.json({
+    data: {
+      guardrailsResult: {
+        Allowed: guardrailsAllowed,
+        Reason: guardrailsReason,
+      },
+    },
+  });
+});
+
 // Main data ingestion endpoint with validation
 app.post("/api/ingestData", async (c) => {
   // Check if MCP guardrails are enabled via feature flag
@@ -204,7 +265,13 @@ app.get("/health", (c) => {
 
 // Validate single request endpoint
 app.post("/api/validate/request", async (c) => {
-  const { payload } = await c.req.json<{ payload: string }>();
+  const body = await c.req.json<{
+    payload: string;
+    path?: string;
+    method?: string;
+    ip?: string;
+    requestHeaders?: string;
+  }>();
 
   const dbUrl = c.env.DATABASE_ABSTRACTOR_SERVICE_URL || "https://cyborg.akto.io";
   const dbToken = c.env.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "";
@@ -218,9 +285,17 @@ app.post("/api/validate/request", async (c) => {
   const tbsHost = c.env.THREAT_BACKEND_URL || "https://tbs.akto.io";
   const tbsToken = c.env.THREAT_BACKEND_TOKEN || "";
 
+  const parsedReqHeaders = body.requestHeaders ? JSON.parse(body.requestHeaders) : {};
+  const valCtx = {
+    ip: body.ip,
+    endpoint: body.path,
+    method: body.method,
+    requestHeaders: parsedReqHeaders,
+  };
+
   const result = await handleRequestValidation(
-    payload,
-    {},
+    body.payload,
+    valCtx,
     policies,
     auditPolicies,
     hasAuditRules,
@@ -238,7 +313,13 @@ app.post("/api/validate/request", async (c) => {
 
 // Validate single response endpoint
 app.post("/api/validate/response", async (c) => {
-  const { payload } = await c.req.json<{ payload: string }>();
+  const body = await c.req.json<{
+    payload: string;
+    path?: string;
+    method?: string;
+    ip?: string;
+    responseHeaders?: string;
+  }>();
 
   const dbUrl = c.env.DATABASE_ABSTRACTOR_SERVICE_URL || "https://cyborg.akto.io";
   const dbToken = c.env.DATABASE_ABSTRACTOR_SERVICE_TOKEN || "";
@@ -247,9 +328,17 @@ app.post("/api/validate/response", async (c) => {
   const tbsHost = c.env.THREAT_BACKEND_URL || "https://tbs.akto.io";
   const tbsToken = c.env.THREAT_BACKEND_TOKEN || "";
 
+  const parsedRespHeaders = body.responseHeaders ? JSON.parse(body.responseHeaders) : {};
+  const valCtx = {
+    ip: body.ip,
+    endpoint: body.path,
+    method: body.method,
+    responseHeaders: parsedRespHeaders,
+  };
+
   const result = await handleResponseValidation(
-    payload,
-    {},
+    body.payload,
+    valCtx,
     policies,
     c.env.AKTO_GUARDRAILS_EXECUTOR,
     tbsHost,
