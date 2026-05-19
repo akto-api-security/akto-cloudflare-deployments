@@ -45,11 +45,41 @@ else
     warn "Falling back to interactive prompts."
 fi
 
+# ─── Container runtime detection ─────────────────────────────────────────────
+# Prefer podman; fall back to docker.
+# When using podman, DOCKER_HOST is pointed at podman's Docker-compatible socket
+# so that `wrangler containers push` (which speaks the Docker API) can find
+# images in podman's local store.
+if command -v podman &>/dev/null && podman info &>/dev/null 2>&1; then
+    CONTAINER_CLI=podman
+    # Resolve podman socket: explicit env var wins, then podman machine (macOS),
+    # then the standard systemd user socket (Linux).
+    if [ -z "$DOCKER_HOST" ]; then
+        _podman_sock=""
+        if command -v podman &>/dev/null; then
+            _podman_sock=$(podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}' 2>/dev/null | head -1 || true)
+        fi
+        if [ -z "$_podman_sock" ]; then
+            _podman_sock="/run/user/$(id -u)/podman/podman.sock"
+        fi
+        if [ -S "$_podman_sock" ]; then
+            export DOCKER_HOST="unix://$_podman_sock"
+        else
+            warn "Podman socket not found at $_podman_sock — 'wrangler containers push' may fail."
+            warn "Start it with: systemctl --user start podman.socket  (Linux)"
+            warn "           or: podman machine start                  (macOS)"
+        fi
+    fi
+elif command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    CONTAINER_CLI=docker
+else
+    CONTAINER_CLI=""
+fi
+
 # ─── Container image helpers ──────────────────────────────────────────────────
-# docker tag / docker buildx build --load on the default "docker" driver both
-# lose platform metadata when the source image has none. A "docker-container"
-# driver buildx builder re-creates the image config and correctly embeds
-# linux/amd64, which wrangler validates before accepting the push.
+# When using docker, a "docker-container" driver buildx builder is required to
+# correctly embed linux/amd64 platform metadata that wrangler validates.
+# Podman's native builder handles --platform correctly without a custom driver.
 _ensure_buildx_builder() {
     if ! docker buildx inspect akto-cf-builder &>/dev/null 2>&1; then
         docker buildx create --name akto-cf-builder \
@@ -61,16 +91,24 @@ _push_cf_image() {
     local src="$1"   # source image (already pulled locally)
     local dst="$2"   # destination: registry.cloudflare.com/ACCOUNT/name:tag
 
-    _ensure_buildx_builder
-
-    echo "FROM $src" | \
-        docker buildx build \
-            --builder akto-cf-builder \
-            --platform linux/amd64 \
-            --provenance=false \
-            --load \
-            -t "$dst" \
-            -
+    if [ "$CONTAINER_CLI" = "podman" ]; then
+        echo "FROM $src" | \
+            podman build \
+                --platform linux/amd64 \
+                --format docker \
+                -t "$dst" \
+                -
+    else
+        _ensure_buildx_builder
+        echo "FROM $src" | \
+            docker buildx build \
+                --builder akto-cf-builder \
+                --platform linux/amd64 \
+                --provenance=false \
+                --load \
+                -t "$dst" \
+                -
+    fi
 
     npx wrangler containers push "$dst"
 }
@@ -117,7 +155,9 @@ check_prereqs() {
         fi
     fi
 
-    if ! npx wrangler whoami &>/dev/null 2>&1; then
+    if [ -n "$CLOUDFLARE_API_TOKEN" ]; then
+        ok "Wrangler auth: CLOUDFLARE_API_TOKEN is set"
+    elif ! npx wrangler whoami &>/dev/null 2>&1; then
         warn "Not logged in to Cloudflare — running 'wrangler login'..."
         npx wrangler login
     else
@@ -158,8 +198,7 @@ _require_image_tag() {
     if [ -z "$IMAGE_TAG" ]; then
         echo ""
         echo -e "${BOLD}  Image version tag${NC}"
-        echo "  Cloudflare does not allow overwriting an existing tag."
-        echo "  Use a new tag for each push (e.g. v2, v3, ...)."
+        echo "  Version tag for images pushed to Cloudflare registry (e.g. v1, v2, ...)."
         read -rp "  Image tag [v1]: " IMAGE_TAG
         IMAGE_TAG="${IMAGE_TAG:-v1}"
     fi
@@ -177,40 +216,41 @@ _require_route_pattern() {
 
 # ─── Image push ───────────────────────────────────────────────────────────────
 push_images() {
-    if ! command -v docker &>/dev/null || ! docker info &>/dev/null 2>&1; then
-        err "Docker is required to push images."
-        err "Install Docker from https://docker.com, start it, then re-run."
+    if [ -z "$CONTAINER_CLI" ]; then
+        err "No container runtime found — install podman (preferred) or docker, start it, then re-run."
+        err "  Podman: https://podman.io/docs/installation"
+        err "  Docker: https://docker.com"
         exit 1
     fi
-    ok "Docker available"
+    ok "Container runtime: $CONTAINER_CLI"
 
     echo ""
     echo -e "  ${BOLD}Pushing images to Cloudflare registry (tag: ${IMAGE_TAG})${NC}"
     echo ""
 
     step "1" "mini-runtime"
-    docker pull --platform linux/amd64 aktosecurity/mini-runtime:local
+    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/mini-runtime:local
     _push_cf_image \
         "aktosecurity/mini-runtime:local" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/mini-runtime:${IMAGE_TAG}"
     ok "mini-runtime:${IMAGE_TAG} pushed"
 
     step "2" "data-ingestion-service"
-    docker pull --platform linux/amd64 aktosecurity/data-ingestion-service:latest
+    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/data-ingestion-service:latest
     _push_cf_image \
         "aktosecurity/data-ingestion-service:latest" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/data-ingestion-service:${IMAGE_TAG}"
     ok "data-ingestion-service:${IMAGE_TAG} pushed"
 
     step "3" "guardrails-service"
-    docker pull --platform linux/amd64 aktosecurity/akto-guardrails-service:local
+    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/akto-guardrails-service:local
     _push_cf_image \
         "aktosecurity/akto-guardrails-service:local" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/guardrails-service:${IMAGE_TAG}"
     ok "guardrails-service:${IMAGE_TAG} pushed"
 
     step "4" "agent-guard-executor (Python scanner)"
-    docker pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
+    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
     _push_cf_image \
         "aktosecurity/akto-agent-guard-executor:local" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/agent-guard-executor:${IMAGE_TAG}"
