@@ -229,30 +229,30 @@ push_images() {
     echo ""
 
     step "1" "mini-runtime"
-    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/mini-runtime:local
+    $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/mini-runtime:local
     _push_cf_image \
-        "aktosecurity/mini-runtime:local" \
+        "docker.io/aktosecurity/mini-runtime:local" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/mini-runtime:${IMAGE_TAG}"
     ok "mini-runtime:${IMAGE_TAG} pushed"
 
     step "2" "data-ingestion-service"
-    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/data-ingestion-service:latest
+    $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/data-ingestion-service:latest
     _push_cf_image \
-        "aktosecurity/data-ingestion-service:latest" \
+        "docker.io/aktosecurity/data-ingestion-service:latest" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/data-ingestion-service:${IMAGE_TAG}"
     ok "data-ingestion-service:${IMAGE_TAG} pushed"
 
     step "3" "guardrails-service"
-    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/akto-guardrails-service:local
+    $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/akto-guardrails-service:local
     _push_cf_image \
-        "aktosecurity/akto-guardrails-service:local" \
+        "docker.io/aktosecurity/akto-guardrails-service:local" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/guardrails-service:${IMAGE_TAG}"
     ok "guardrails-service:${IMAGE_TAG} pushed"
 
     step "4" "agent-guard-executor (Python scanner)"
-    $CONTAINER_CLI pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
+    $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/akto-agent-guard-executor:local
     _push_cf_image \
-        "aktosecurity/akto-agent-guard-executor:local" \
+        "docker.io/aktosecurity/akto-agent-guard-executor:local" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/agent-guard-executor:${IMAGE_TAG}"
     ok "agent-guard-executor:${IMAGE_TAG} pushed"
 
