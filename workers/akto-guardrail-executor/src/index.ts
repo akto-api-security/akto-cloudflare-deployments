@@ -1,10 +1,10 @@
 import { Container } from "@cloudflare/containers";
 
 type Env = {
-  readonly AKTO_AGENT_GUARD_EXECUTOR_CONTAINER: DurableObjectNamespace<AktoAgentGuardExecutorContainer>;
+  readonly AKTO_GUARDRAIL_EXECUTOR_CONTAINER: DurableObjectNamespace<AktoGuardrailExecutorContainer>;
 };
 
-export class AktoAgentGuardExecutorContainer extends Container {
+export class AktoGuardrailExecutorContainer extends Container {
   defaultPort = 8092;
   sleepAfter = "2h";
 
@@ -37,7 +37,7 @@ export class AktoAgentGuardExecutorContainer extends Container {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    const id = env.AKTO_AGENT_GUARD_EXECUTOR_CONTAINER.idFromName("main");
-    return env.AKTO_AGENT_GUARD_EXECUTOR_CONTAINER.get(id).fetch(request);
+    const id = env.AKTO_GUARDRAIL_EXECUTOR_CONTAINER.idFromName("main");
+    return env.AKTO_GUARDRAIL_EXECUTOR_CONTAINER.get(id).fetch(request);
   },
 };

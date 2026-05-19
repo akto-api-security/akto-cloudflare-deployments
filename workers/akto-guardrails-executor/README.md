@@ -19,22 +19,22 @@ npm install
 
 ```bash
 # Pull base image
-docker pull --platform linux/amd64 public.ecr.aws/aktosecurity/akto-agent-guard-executor:1.12.1_local
+docker pull --platform linux/amd64 public.ecr.aws/aktosecurity/akto-guardrail-executor:1.12.1_local
 
 # Rebuild for linux/amd64 (required)
-docker buildx build --platform linux/amd64 --load -t agent-guard-executor:testing - <<'EOF'
-FROM public.ecr.aws/aktosecurity/akto-agent-guard-executor:1.12.1_local
+docker buildx build --platform linux/amd64 --load -t guardrail-executor:testing - <<'EOF'
+FROM public.ecr.aws/aktosecurity/akto-guardrail-executor:1.12.1_local
 EOF
 
 # Push to Cloudflare
-npx wrangler containers push agent-guard-executor:testing
+npx wrangler containers push guardrail-executor:testing
 ```
 
 ### 3. Update wrangler.jsonc
 
 Set the image path (replace with your Cloudflare account ID):
 ```jsonc
-"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/agent-guard-executor:testing"
+"image": "registry.cloudflare.com/<YOUR_CLOUDFLARE_ACCOUNT_ID>/guardrail-executor:testing"
 ```
 
 ### 4. Deploy

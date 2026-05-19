@@ -13,7 +13,7 @@ Client Request
           ├── forwards request → your origin / worker
           └── async (fire-and-forget, no latency added)
               → akto-ingest-guardrails
-                  ├── akto-guardrails-executor → akto-agent-guard-executor  (security scanning)
+                  ├── akto-guardrails-executor → akto-guardrail-executor  (security scanning)
                   └── akto-mini-runtime                              (API discovery → Akto Dashboard)
   ← Response to client
 ```
@@ -29,7 +29,7 @@ All traffic analysis happens asynchronously after the response is sent, so there
 | `akto-cloudflare-proxy` | — | Transparent proxy. Captures all traffic and forwards it asynchronously. |
 | `akto-ingest-guardrails` | `data-ingestion-service` | Receives traffic, routes to scanner and mini-runtime. |
 | `akto-guardrails-executor` | `guardrails-service` | Runs security policy checks. |
-| `akto-agent-guard-executor` | `agent-guard-executor` | Python ML service for API threat detection. |
+| `akto-guardrail-executor` | `guardrail-executor` | Python ML service for API threat detection. |
 | `akto-mini-runtime` | `mini-runtime` | Discovers API endpoints and syncs them to Akto Dashboard. |
 
 ### How workers connect
@@ -38,7 +38,7 @@ All traffic analysis happens asynchronously after the response is sent, so there
 akto-cloudflare-proxy  →  akto-ingest-guardrails   (service binding)
 akto-ingest-guardrails →  akto-guardrails-executor  (service binding)
 akto-ingest-guardrails →  akto-mini-runtime         (service binding)
-akto-guardrails-executor → akto-agent-guard-executor       (HTTP)
+akto-guardrails-executor → akto-guardrail-executor         (HTTP)
 ```
 
 ---
@@ -52,7 +52,7 @@ All images are pulled from DockerHub — no local builds needed.
 | `akto-mini-runtime` | `aktosecurity/mini-runtime:local` |
 | `akto-ingest-guardrails` | `aktosecurity/data-ingestion-service:latest` |
 | `akto-guardrails-executor` | `aktosecurity/akto-guardrails-service:local` |
-| `akto-agent-guard-executor` | `aktosecurity/akto-agent-guard-executor:local` |
+| `akto-guardrail-executor` | `aktosecurity/akto-agent-guard-executor:local` |
 
 ---
 
@@ -127,7 +127,7 @@ for entry in \
     "aktosecurity/mini-runtime:local=mini-runtime" \
     "aktosecurity/data-ingestion-service:latest=data-ingestion-service" \
     "aktosecurity/akto-guardrails-service:local=guardrails-service" \
-    "aktosecurity/akto-agent-guard-executor:local=agent-guard-executor"; do
+    "aktosecurity/akto-agent-guard-executor:local=guardrail-executor"; do
   src="${entry%%=*}"
   name="${entry##*=}"
   dst="registry.cloudflare.com/${ACCOUNT}/${name}:${TAG}"
@@ -144,7 +144,7 @@ In each worker's `wrangler.jsonc`, replace `YOUR_ACCOUNT_ID` with your Cloudflar
 workers/akto-mini-runtime/wrangler.jsonc
 workers/akto-ingest-guardrails/wrangler.jsonc
 workers/akto-guardrails-executor/wrangler.jsonc
-workers/akto-agent-guard-executor/wrangler.jsonc
+workers/akto-guardrail-executor/wrangler.jsonc
 ```
 
 Example (in each file):
@@ -160,9 +160,9 @@ Also set your Akto account ID and route in `workers/akto-cloudflare-proxy/wrangl
 "zone_name": "yourdomain.com"
 ```
 
-And set the agent-guard-executor URL in `workers/akto-guardrails-executor/wrangler.jsonc` — you'll get this after deploying `akto-agent-guard-executor` in step 3:
+And set the guardrail-executor URL in `workers/akto-guardrails-executor/wrangler.jsonc` — you'll get this after deploying `akto-guardrail-executor` in step 3:
 ```jsonc
-"AGENT_GUARD_ENGINE_URL": "https://akto-agent-guard-executor.<your-subdomain>.workers.dev"
+"AGENT_GUARD_ENGINE_URL": "https://akto-guardrail-executor.<your-subdomain>.workers.dev"
 ```
 
 ### Step 3 — Deploy workers in order
@@ -176,12 +176,12 @@ npm install
 npx wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN
 npx wrangler deploy
 
-# 2. agent-guard-executor — note the deployed URL in the output (you'll need it for step 3)
-cd ../akto-agent-guard-executor
+# 2. guardrail-executor — note the deployed URL in the output (you'll need it for step 3)
+cd ../akto-guardrail-executor
 npm install
 npx wrangler deploy
 
-# 3. guardrails-executor — paste the agent-guard-executor URL from step 2 into wrangler.jsonc first
+# 3. guardrails-executor — paste the guardrail-executor URL from step 2 into wrangler.jsonc first
 cd ../akto-guardrails-executor
 npm install
 npx wrangler secret put DATABASE_ABSTRACTOR_SERVICE_TOKEN
@@ -231,7 +231,7 @@ In `workers/akto-mini-runtime/wrangler.jsonc`, set `MINI_RUNTIME_NAME` to identi
 npx wrangler tail akto-cloudflare-proxy          --format pretty
 npx wrangler tail akto-ingest-guardrails         --format pretty
 npx wrangler tail akto-guardrails-executor       --format pretty
-npx wrangler tail akto-agent-guard-executor             --format pretty
+npx wrangler tail akto-guardrail-executor               --format pretty
 npx wrangler tail akto-mini-runtime              --format pretty
 ```
 

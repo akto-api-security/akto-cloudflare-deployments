@@ -52,7 +52,7 @@
 		// Public URL of the Akto database abstractor service.
 		"DATABASE_ABSTRACTOR_SERVICE_URL": "https://ultron.akto.io",
 
-		// workers.dev URL of akto-agent-guard-executor — set automatically by deploy.sh.
+		// workers.dev URL of akto-guardrail-executor — set automatically by deploy.sh.
 		"AGENT_GUARD_ENGINE_URL": "",
 
 		"LOG_LEVEL": "info"

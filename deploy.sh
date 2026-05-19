@@ -6,7 +6,7 @@
 #
 # Workers deployed:
 #   1. akto-mini-runtime          — mini-runtime container (processes & sends to Akto)
-#   2. akto-agent-guard-executor         — agent-guard-executor container (Python scanner)
+#   2. akto-guardrail-executor           — guardrail-executor container (Python scanner)
 #   3. akto-guardrails-executor   — guardrails-service container (policy enforcement)
 #   4. akto-ingest-guardrails     — data-ingestion-service container (receives traffic)
 #   5. akto-cloudflare-proxy      — route worker (intercepts client traffic)
@@ -206,12 +206,7 @@ _require_image_tag() {
 }
 
 _require_route_pattern() {
-    if [ -z "$ROUTE_PATTERN" ]; then
-        echo ""
-        echo -e "  ${BOLD}Route pattern${NC} — the Cloudflare route this proxy intercepts."
-        echo "  Examples:  api.yourdomain.com/*   or   *.yourdomain.com/*"
-        read -rp "  Route pattern: " ROUTE_PATTERN
-    fi
+    : # ROUTE_PATTERN is optional — empty means no route is configured
 }
 
 # ─── Image push ───────────────────────────────────────────────────────────────
@@ -253,8 +248,8 @@ push_images() {
     $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/akto-agent-guard-executor:local
     _push_cf_image \
         "docker.io/aktosecurity/akto-agent-guard-executor:local" \
-        "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/agent-guard-executor:${IMAGE_TAG}"
-    ok "agent-guard-executor:${IMAGE_TAG} pushed"
+        "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/guardrail-executor:${IMAGE_TAG}"
+    ok "guardrail-executor:${IMAGE_TAG} pushed"
 
     echo ""
     ok "All images pushed to Cloudflare registry"
@@ -282,8 +277,8 @@ deploy_mini_runtime() {
 }
 
 deploy_agent_guard_executor() {
-    header "Step 2/5 — akto-agent-guard-executor"
-    cd "$REPO_ROOT/workers/akto-agent-guard-executor"
+    header "Step 2/5 — akto-guardrail-executor"
+    cd "$REPO_ROOT/workers/akto-guardrail-executor"
 
     step "1" "Installing dependencies"
     npm install --silent; ok "Done"
@@ -293,14 +288,15 @@ deploy_agent_guard_executor() {
     ok "Image registry: registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/..."
 
     step "3" "Deploying"
-    local deploy_out
-    deploy_out=$(npx wrangler deploy 2>&1)
-    echo "$deploy_out"
-    AGENT_GUARD_URL=$(echo "$deploy_out" | grep -o 'https://akto-agent-guard-executor\.[^ ]*' | head -1)
+    local deploy_out deploy_tmp
+    deploy_tmp=$(mktemp)
+    npx wrangler deploy 2>&1 | tee "$deploy_tmp"
+    deploy_out=$(cat "$deploy_tmp"); rm -f "$deploy_tmp"
+    AGENT_GUARD_URL=$(echo "$deploy_out" | grep -o 'https://akto-guardrail-executor\.[^ ]*' | head -1)
     if [ -n "$AGENT_GUARD_URL" ]; then
-        ok "akto-agent-guard-executor deployed ✓ → ${AGENT_GUARD_URL}"
+        ok "akto-guardrail-executor deployed ✓ → ${AGENT_GUARD_URL}"
     else
-        ok "akto-agent-guard-executor deployed ✓"
+        ok "akto-guardrail-executor deployed ✓"
     fi
     cd "$REPO_ROOT"
 }
@@ -361,7 +357,6 @@ deploy_proxy() {
     npm install --silent; ok "Done"
 
     step "2" "Patching wrangler.jsonc"
-    _require_route_pattern
     if [ -n "$ROUTE_PATTERN" ]; then
         ZONE=$(echo "$ROUTE_PATTERN" | sed 's/^\*\.//' | sed 's|/.*||' | awk -F. 'NF>=2{print $(NF-1)"."$NF}')
         sed -i.bak \
@@ -371,7 +366,16 @@ deploy_proxy() {
         rm -f wrangler.jsonc.bak
         ok "Route: ${ROUTE_PATTERN}  (zone: ${ZONE})"
     else
-        warn "Route unchanged"
+        # Remove the routes block so wrangler deploys without binding to any route.
+        # The worker can still be invoked directly or via a custom domain binding.
+        node -e "
+            const fs = require('fs');
+            const src = fs.readFileSync('wrangler.jsonc', 'utf8');
+            // Strip the entire \"routes\": [...] block (handles multi-line, with comments)
+            const out = src.replace(/,?\s*\"routes\"\s*:\s*\[[^\]]*\]/s, '');
+            fs.writeFileSync('wrangler.jsonc', out);
+        "
+        ok "ROUTE_PATTERN not set — routes block removed, worker deployed without a route"
     fi
 
     GUARDRAILS_MODE="${GUARDRAILS_MODE:-async}"
@@ -396,13 +400,13 @@ cat <<'BANNER'
 
   Workers deployed by this script:
     akto-mini-runtime          — mini-runtime container (traffic to Akto)
-    akto-agent-guard-executor         — agent-guard-executor container (Python scanner)
+    akto-guardrail-executor           — guardrail-executor container (Python scanner)
     akto-guardrails-executor   — guardrails-service container (policy enforcement)
     akto-ingest-guardrails     — data-ingestion-service container
     akto-cloudflare-proxy      — route worker (intercepts traffic)
 
   Note:
-    akto-agent-guard-executor URL is pre-configured in akto-guardrails-executor/wrangler.jsonc
+    akto-guardrail-executor URL is pre-configured in akto-guardrails-executor/wrangler.jsonc
 
 BANNER
 
@@ -424,7 +428,7 @@ if [[ "$PUSH_IMAGES_ANSWER" =~ ^[Yy]$ ]]; then
         "$REPO_ROOT/workers/akto-guardrails-executor/wrangler.jsonc" \
         "$REPO_ROOT/workers/akto-mini-runtime/wrangler.jsonc" \
         "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc" \
-        "$REPO_ROOT/workers/akto-agent-guard-executor/wrangler.jsonc"; do
+        "$REPO_ROOT/workers/akto-guardrail-executor/wrangler.jsonc"; do
         sed -i.bak \
             -e "s|registry.cloudflare.com/[^/]*/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
             -e "s|\(registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/[^:\"]*\):[^\"]*\"|\1:${IMAGE_TAG}\"|g" \
@@ -451,7 +455,7 @@ echo "  Traffic flow:"
 echo "    Client → akto-cloudflare-proxy → origin server"
 echo "           ↳ async: akto-ingest-guardrails (binding)"
 echo "                    → akto-guardrails-executor (binding) → policy check"
-echo "                      → akto-agent-guard-executor (HTTP) → agent-guard-executor"
+echo "                      → akto-guardrail-executor (HTTP) → guardrail-executor"
 echo "                    → akto-mini-runtime (binding) → Akto"
 echo ""
 echo "  Next steps:"
@@ -464,7 +468,7 @@ echo "  Monitor logs:"
 echo "    npx wrangler tail akto-cloudflare-proxy          --format pretty"
 echo "    npx wrangler tail akto-ingest-guardrails         --format pretty"
 echo "    npx wrangler tail akto-guardrails-executor       --format pretty"
-echo "    npx wrangler tail akto-agent-guard-executor             --format pretty"
+echo "    npx wrangler tail akto-guardrail-executor               --format pretty"
 echo "    npx wrangler tail akto-mini-runtime              --format pretty"
 echo ""
 echo -e "${GREEN}${BOLD}  Documentation: https://docs.akto.io/traffic-connector/api-gateways/cloudflare${NC}"

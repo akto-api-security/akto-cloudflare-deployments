@@ -27,13 +27,13 @@ WORKERS=(
     "akto-cloudflare-proxy"
     "akto-ingest-guardrails"
     "akto-guardrails-executor"
-    "akto-agent-guard-executor"
+    "akto-guardrail-executor"
     "akto-mini-runtime"
 )
 
 CONTAINER_APPS=(
     "akto-guardrails-executor-container"
-    "akto-agent-guard-executor-container"
+    "akto-guardrail-executor-container"
     "akto-mini-runtime-container"
     "akto-data-ingestion-container"
 )

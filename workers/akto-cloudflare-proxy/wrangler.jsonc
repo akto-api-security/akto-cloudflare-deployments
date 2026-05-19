@@ -40,13 +40,5 @@
 		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
 		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
 		"AKTO_ACCOUNT_ID": "1000000"
-	},
-
-	"routes": [
-		{
-			// Update to match your domain — e.g., "api.yourdomain.com/*"
-			"pattern": "example.com/*",
-			"zone_name": "example.com"
-		}
-	]
+	}
 }
