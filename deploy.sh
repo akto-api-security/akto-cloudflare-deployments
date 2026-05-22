@@ -245,9 +245,9 @@ push_images() {
     ok "guardrails-service:${IMAGE_TAG} pushed"
 
     step "4" "agent-guard-executor (Python scanner)"
-    $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/akto-agent-guard-executor:local
+    $CONTAINER_CLI pull --platform linux/amd64 docker.io/aktosecurity/akto-agent-guard-executor:2.0.1
     _push_cf_image \
-        "docker.io/aktosecurity/akto-agent-guard-executor:local" \
+        "docker.io/aktosecurity/akto-agent-guard-executor:2.0.1" \
         "registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/guardrail-executor:${IMAGE_TAG}"
     ok "guardrail-executor:${IMAGE_TAG} pushed"
 
@@ -414,28 +414,30 @@ check_prereqs
 _require_cloudflare_account_id
 _require_akto_account_id
 
+# ── Image tag + wrangler patching (always required) ───────────────────────────
+_require_image_tag
+
+# Patch account ID + image tag into all wrangler.jsonc files regardless of
+# whether images are pushed — skipping the push still needs the correct tag.
+for f in \
+    "$REPO_ROOT/workers/akto-guardrails-service/wrangler.jsonc" \
+    "$REPO_ROOT/workers/akto-mini-runtime/wrangler.jsonc" \
+    "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc" \
+    "$REPO_ROOT/workers/akto-guardrail-executor/wrangler.jsonc"; do
+    sed -i.bak \
+        -e "s|registry.cloudflare.com/[^/]*/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
+        -e "s|\(registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/[^:\"]*\):[^\"]*\"|\1:${IMAGE_TAG}\"|g" \
+        "$f"
+    rm -f "${f}.bak"
+done
+
 # ── Image push (optional) ─────────────────────────────────────────────────────
 echo ""
-echo -e "  ${BOLD}Push Docker images to Cloudflare registry?${NC}"
-echo "  Skip if images are already pushed."
+echo -e "  ${BOLD}Push container images to Cloudflare registry?${NC}"
+echo "  Skip if images are already pushed with tag ${IMAGE_TAG}."
 echo ""
 read -rp "  Push images? (y/N): " PUSH_IMAGES_ANSWER
 if [[ "$PUSH_IMAGES_ANSWER" =~ ^[Yy]$ ]]; then
-    _require_image_tag
-
-    # Patch account ID + image tag into all wrangler.jsonc files
-    for f in \
-        "$REPO_ROOT/workers/akto-guardrails-service/wrangler.jsonc" \
-        "$REPO_ROOT/workers/akto-mini-runtime/wrangler.jsonc" \
-        "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc" \
-        "$REPO_ROOT/workers/akto-guardrail-executor/wrangler.jsonc"; do
-        sed -i.bak \
-            -e "s|registry.cloudflare.com/[^/]*/|registry.cloudflare.com/${CLOUDFLARE_ACCOUNT_ID}/|g" \
-            -e "s|\(registry\.cloudflare\.com/${CLOUDFLARE_ACCOUNT_ID}/[^:\"]*\):[^\"]*\"|\1:${IMAGE_TAG}\"|g" \
-            "$f"
-        rm -f "${f}.bak"
-    done
-
     push_images
 fi
 

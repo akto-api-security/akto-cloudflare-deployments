@@ -52,7 +52,7 @@ All images are pulled from DockerHub — no local builds needed.
 | `akto-mini-runtime-cf` | `aktosecurity/mini-runtime:local` |
 | `akto-ingest-guardrails-cf` | `aktosecurity/data-ingestion-service:latest` |
 | `akto-guardrails-service-cf` | `aktosecurity/akto-guardrails-service:local` |
-| `akto-guardrail-executor-cf` | `aktosecurity/akto-agent-guard-executor:local` |
+| `akto-guardrail-executor-cf` | `aktosecurity/akto-agent-guard-executor:2.0.1` |
 
 ---
 
@@ -118,7 +118,7 @@ TAG=v1
 docker pull --platform linux/amd64 aktosecurity/mini-runtime:local
 docker pull --platform linux/amd64 aktosecurity/data-ingestion-service:latest
 docker pull --platform linux/amd64 aktosecurity/akto-guardrails-service:local
-docker pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:local
+docker pull --platform linux/amd64 aktosecurity/akto-agent-guard-executor:2.0.1
 
 # Re-tag and push to Cloudflare registry
 # Note: use docker buildx (not plain docker tag) to preserve the linux/amd64 platform metadata
@@ -127,7 +127,7 @@ for entry in \
     "aktosecurity/mini-runtime:local=mini-runtime" \
     "aktosecurity/data-ingestion-service:latest=data-ingestion-service" \
     "aktosecurity/akto-guardrails-service:local=guardrails-service" \
-    "aktosecurity/akto-agent-guard-executor:local=guardrail-executor"; do
+    "aktosecurity/akto-agent-guard-executor:2.0.1=guardrail-executor"; do
   src="${entry%%=*}"
   name="${entry##*=}"
   dst="registry.cloudflare.com/${ACCOUNT}/${name}:${TAG}"
