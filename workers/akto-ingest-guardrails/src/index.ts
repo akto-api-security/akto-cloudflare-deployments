@@ -1,7 +1,7 @@
 import { Container } from "@cloudflare/containers";
 import { Hono } from "hono";
 
-export class AktoDataIngestionContainer extends Container {
+export class AktoDataIngestionContainerCf extends Container {
   defaultPort = 8080;
   sleepAfter = "2h";
 
@@ -32,8 +32,8 @@ export class AktoDataIngestionContainer extends Container {
 }
 
 type Env = {
-  AKTO_DATA_INGESTION_CONTAINER: DurableObjectNamespace<AktoDataIngestionContainer>;
-  AKTO_GUARDRAILS_EXECUTOR: Fetcher;
+  AKTO_DATA_INGESTION_CONTAINER_CF: DurableObjectNamespace<AktoDataIngestionContainerCf>;
+  AKTO_GUARDRAILS_SERVICE: Fetcher;
   AKTO_MINI_RUNTIME_WORKER: Fetcher;
   ENABLE_MCP_GUARDRAILS: string;
 };
@@ -41,8 +41,8 @@ type Env = {
 const app = new Hono<{ Bindings: Env }>();
 
 function forwardToDataIngestion(request: Request, env: Env): Promise<Response> {
-  const id = env.AKTO_DATA_INGESTION_CONTAINER.idFromName("main");
-  return env.AKTO_DATA_INGESTION_CONTAINER.get(id).fetch(request);
+  const id = env.AKTO_DATA_INGESTION_CONTAINER_CF.idFromName("main");
+  return env.AKTO_DATA_INGESTION_CONTAINER_CF.get(id).fetch(request);
 }
 
 function forwardToMiniRuntime(body: string, env: Env): Promise<Response> {
@@ -60,7 +60,7 @@ app.get("/health", (c) => c.json({ success: true, status: "healthy" }));
 // ─── /api/http-proxy ──────────────────────────────────────────────────────────
 // Called by akto-cloudflare-proxy for every intercepted request.
 // Query params:
-//   guardrails=true     validate via akto-guardrails-executor
+//   guardrails=true     validate via akto-guardrails-service-cf
 //   ingest_data=true    ingest via data-ingestion container + forward to mini-runtime
 
 app.post("/api/http-proxy", async (c) => {
@@ -74,8 +74,8 @@ app.post("/api/http-proxy", async (c) => {
 
   if (c.env.ENABLE_MCP_GUARDRAILS === "true" && guardrails) {
     try {
-      const res = await c.env.AKTO_GUARDRAILS_EXECUTOR.fetch(
-        new Request("https://guardrails-executor/api/validate/request", {
+      const res = await c.env.AKTO_GUARDRAILS_SERVICE.fetch(
+        new Request("https://guardrails-service/api/validate/request", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: bodyText,

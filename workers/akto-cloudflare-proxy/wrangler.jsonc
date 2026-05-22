@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "akto-cloudflare-proxy",
+	"name": "akto-cloudflare-proxy-cf",
 	"main": "src/index.js",
 	"compatibility_date": "2025-06-23",
 
@@ -15,12 +15,15 @@
 		}
 	},
 
+	// Route rule — deploy.sh replaces pattern/zone_name from ROUTE_PATTERN,
+	// or removes this block entirely if ROUTE_PATTERN is empty.,
+
 	"services": [
 		{
 			// akto-ingest-guardrails must be deployed before this worker.
 			// Handles traffic ingestion (/api/ingestData) and guardrails (/api/http-proxy).
 			"binding": "AKTO_INGESTION_WORKER",
-			"service": "akto-ingest-guardrails"
+			"service": "akto-ingest-guardrails-cf"
 		}
 	],
 
@@ -37,7 +40,6 @@
 		// Leave empty to guard all endpoints. Example: "/api/chat,/api/completions"
 		"AKTO_ENDPOINTS_TO_GUARD": "",
 
-		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
 		// Your Akto account ID. Find it in: Akto Dashboard → Settings → Account.
 		"AKTO_ACCOUNT_ID": "1000000"
 	}

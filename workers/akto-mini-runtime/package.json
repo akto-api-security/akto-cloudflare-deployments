@@ -1,5 +1,5 @@
 {
-  "name": "akto-mini-runtime",
+  "name": "akto-mini-runtime-cf",
   "version": "0.0.1",
   "description": "Cloudflare Worker for Akto mini-runtime container",
   "private": true,

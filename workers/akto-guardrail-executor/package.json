@@ -1,5 +1,5 @@
 {
-  "name": "akto-guardrail-executor",
+  "name": "akto-guardrail-executor-cf",
   "version": "0.0.1",
   "private": true,
   "scripts": {

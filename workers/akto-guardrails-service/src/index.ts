@@ -2,14 +2,14 @@ import { Container } from "@cloudflare/containers";
 import { Hono } from "hono";
 
 type Environment = {
-  readonly AKTO_GUARDRAILS_EXECUTOR_CONTAINER: DurableObjectNamespace<AktoGuardrailsExecutorContainer>;
+  readonly AKTO_GUARDRAILS_SERVICE_CONTAINER_CF: DurableObjectNamespace<AktoGuardrailsServiceContainerCf>;
   readonly DATABASE_ABSTRACTOR_SERVICE_URL: string;
   readonly DATABASE_ABSTRACTOR_SERVICE_TOKEN: string;
   readonly AGENT_GUARD_ENGINE_URL?: string;
   readonly LOG_LEVEL?: string;
 };
 
-export class AktoGuardrailsExecutorContainer extends Container {
+export class AktoGuardrailsServiceContainerCf extends Container {
   defaultPort = 8080;
   sleepAfter = "2h";
 
@@ -60,13 +60,12 @@ export default {
       return app.fetch(request, env, ctx);
     }
 
-    // Forward all requests to the guardrails-service container (single instance)
     try {
-      const containerId = env.AKTO_GUARDRAILS_EXECUTOR_CONTAINER.idFromName("main");
-      const container = env.AKTO_GUARDRAILS_EXECUTOR_CONTAINER.get(containerId);
+      const containerId = env.AKTO_GUARDRAILS_SERVICE_CONTAINER_CF.idFromName("main");
+      const container = env.AKTO_GUARDRAILS_SERVICE_CONTAINER_CF.get(containerId);
       return await container.fetch(request);
     } catch (error) {
-      console.error("[Guardrails Executor] Error:", error);
+      console.error("[Guardrails Service] Error:", error);
       return new Response(JSON.stringify({ error: "Guardrails service unavailable", details: String(error) }), {
         status: 503,
         headers: { "Content-Type": "application/json" },

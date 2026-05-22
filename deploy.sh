@@ -5,19 +5,19 @@
 # Copy .env.example → .env, fill in values, then run ./deploy.sh
 #
 # Workers deployed:
-#   1. akto-mini-runtime          — mini-runtime container (processes & sends to Akto)
-#   2. akto-guardrail-executor           — guardrail-executor container (Python scanner)
-#   3. akto-guardrails-executor   — guardrails-service container (policy enforcement)
-#   4. akto-ingest-guardrails     — data-ingestion-service container (receives traffic)
-#   5. akto-cloudflare-proxy      — route worker (intercepts client traffic)
+#   1. akto-mini-runtime-cf          — mini-runtime container (processes & sends to Akto)
+#   2. akto-guardrail-executor-cf           — guardrail-executor container (Python scanner)
+#   3. akto-guardrails-service-cf   — guardrails-service container (policy enforcement)
+#   4. akto-ingest-guardrails-cf     — data-ingestion-service container (receives traffic)
+#   5. akto-cloudflare-proxy-cf      — route worker (intercepts client traffic)
 #
 # Service bindings (worker → worker, no HTTP):
-#   akto-cloudflare-proxy    → akto-ingest-guardrails     (AKTO_INGESTION_WORKER)
-#   akto-ingest-guardrails   → akto-guardrails-executor   (AKTO_GUARDRAILS_EXECUTOR)
-#   akto-ingest-guardrails   → akto-mini-runtime          (AKTO_MINI_RUNTIME_WORKER)
+#   akto-cloudflare-proxy-cf    → akto-ingest-guardrails-cf     (AKTO_INGESTION_WORKER)
+#   akto-ingest-guardrails-cf   → akto-guardrails-service-cf   (AKTO_GUARDRAILS_SERVICE)
+#   akto-ingest-guardrails-cf   → akto-mini-runtime-cf          (AKTO_MINI_RUNTIME_WORKER)
 #
 # External service (not deployed here):
-#   AGENT_GUARD_ENGINE_URL — set in akto-guardrails-executor/wrangler.jsonc
+#   AGENT_GUARD_ENGINE_URL — set in akto-guardrails-service/wrangler.jsonc
 
 set -eo pipefail
 
@@ -257,7 +257,7 @@ push_images() {
 
 # ─── Workers ──────────────────────────────────────────────────────────────────
 deploy_mini_runtime() {
-    header "Step 1/5 — akto-mini-runtime"
+    header "Step 1/5 — akto-mini-runtime-cf"
     cd "$REPO_ROOT/workers/akto-mini-runtime"
 
     step "1" "Installing dependencies"
@@ -272,12 +272,12 @@ deploy_mini_runtime() {
         "Akto Dashboard → Quick Start → Hybrid SaaS → Connect → Copy Token"
 
     step "4" "Deploying"
-    npx wrangler deploy; ok "akto-mini-runtime deployed ✓"
+    npx wrangler deploy; ok "akto-mini-runtime-cf deployed ✓"
     cd "$REPO_ROOT"
 }
 
 deploy_agent_guard_executor() {
-    header "Step 2/5 — akto-guardrail-executor"
+    header "Step 2/5 — akto-guardrail-executor-cf"
     cd "$REPO_ROOT/workers/akto-guardrail-executor"
 
     step "1" "Installing dependencies"
@@ -292,18 +292,18 @@ deploy_agent_guard_executor() {
     deploy_tmp=$(mktemp)
     npx wrangler deploy 2>&1 | tee "$deploy_tmp"
     deploy_out=$(cat "$deploy_tmp"); rm -f "$deploy_tmp"
-    AGENT_GUARD_URL=$(echo "$deploy_out" | grep -o 'https://akto-guardrail-executor\.[^ ]*' | head -1)
+    AGENT_GUARD_URL=$(echo "$deploy_out" | grep -o 'https://akto-guardrail-executor-cf\.[^ ]*' | head -1)
     if [ -n "$AGENT_GUARD_URL" ]; then
-        ok "akto-guardrail-executor deployed ✓ → ${AGENT_GUARD_URL}"
+        ok "akto-guardrail-executor-cf deployed ✓ → ${AGENT_GUARD_URL}"
     else
-        ok "akto-guardrail-executor deployed ✓"
+        ok "akto-guardrail-executor-cf deployed ✓"
     fi
     cd "$REPO_ROOT"
 }
 
-deploy_guardrails_executor() {
-    header "Step 3/5 — akto-guardrails-executor"
-    cd "$REPO_ROOT/workers/akto-guardrails-executor"
+deploy_guardrails_service() {
+    header "Step 3/5 — akto-guardrails-service-cf"
+    cd "$REPO_ROOT/workers/akto-guardrails-service"
 
     step "1" "Installing dependencies"
     npm install --silent; ok "Done"
@@ -325,12 +325,12 @@ deploy_guardrails_executor() {
         "Akto Dashboard → Quick Start → Hybrid SaaS → Connect → Copy Token"
 
     step "4" "Deploying"
-    npx wrangler deploy; ok "akto-guardrails-executor deployed ✓"
+    npx wrangler deploy; ok "akto-guardrails-service-cf deployed ✓"
     cd "$REPO_ROOT"
 }
 
 deploy_ingest_guardrails() {
-    header "Step 4/5 — akto-ingest-guardrails"
+    header "Step 4/5 — akto-ingest-guardrails-cf"
     cd "$REPO_ROOT/workers/akto-ingest-guardrails"
 
     step "1" "Installing dependencies"
@@ -345,12 +345,12 @@ deploy_ingest_guardrails() {
     ok "ENABLE_MCP_GUARDRAILS=true"
 
     step "3" "Deploying"
-    npx wrangler deploy; ok "akto-ingest-guardrails deployed ✓"
+    npx wrangler deploy; ok "akto-ingest-guardrails-cf deployed ✓"
     cd "$REPO_ROOT"
 }
 
 deploy_proxy() {
-    header "Step 5/5 — akto-cloudflare-proxy"
+    header "Step 5/5 — akto-cloudflare-proxy-cf"
     cd "$REPO_ROOT/workers/akto-cloudflare-proxy"
 
     step "1" "Installing dependencies"
@@ -388,7 +388,7 @@ deploy_proxy() {
     ok "APPLY_AKTO_GUARDRAILS=true  AKTO_GUARDRAILS_MODE=${GUARDRAILS_MODE}  AKTO_ACCOUNT_ID=${AKTO_ACCOUNT_ID}"
 
     step "3" "Deploying"
-    npx wrangler deploy; ok "akto-cloudflare-proxy deployed ✓"
+    npx wrangler deploy; ok "akto-cloudflare-proxy-cf deployed ✓"
     cd "$REPO_ROOT"
 }
 
@@ -399,14 +399,14 @@ cat <<'BANNER'
   Intercept, analyse, and protect API traffic on Cloudflare Workers.
 
   Workers deployed by this script:
-    akto-mini-runtime          — mini-runtime container (traffic to Akto)
-    akto-guardrail-executor           — guardrail-executor container (Python scanner)
-    akto-guardrails-executor   — guardrails-service container (policy enforcement)
-    akto-ingest-guardrails     — data-ingestion-service container
-    akto-cloudflare-proxy      — route worker (intercepts traffic)
+    akto-mini-runtime-cf          — mini-runtime container (traffic to Akto)
+    akto-guardrail-executor-cf           — guardrail-executor container (Python scanner)
+    akto-guardrails-service-cf   — guardrails-service container (policy enforcement)
+    akto-ingest-guardrails-cf     — data-ingestion-service container
+    akto-cloudflare-proxy-cf      — route worker (intercepts traffic)
 
   Note:
-    akto-guardrail-executor URL is pre-configured in akto-guardrails-executor/wrangler.jsonc
+    akto-guardrail-executor-cf URL is pre-configured in akto-guardrails-service/wrangler.jsonc
 
 BANNER
 
@@ -425,7 +425,7 @@ if [[ "$PUSH_IMAGES_ANSWER" =~ ^[Yy]$ ]]; then
 
     # Patch account ID + image tag into all wrangler.jsonc files
     for f in \
-        "$REPO_ROOT/workers/akto-guardrails-executor/wrangler.jsonc" \
+        "$REPO_ROOT/workers/akto-guardrails-service/wrangler.jsonc" \
         "$REPO_ROOT/workers/akto-mini-runtime/wrangler.jsonc" \
         "$REPO_ROOT/workers/akto-ingest-guardrails/wrangler.jsonc" \
         "$REPO_ROOT/workers/akto-guardrail-executor/wrangler.jsonc"; do
@@ -442,7 +442,7 @@ fi
 # ── Deploy all workers ────────────────────────────────────────────────────────
 deploy_mini_runtime
 deploy_agent_guard_executor
-deploy_guardrails_executor
+deploy_guardrails_service
 deploy_ingest_guardrails
 deploy_proxy
 
@@ -452,11 +452,11 @@ header "Deployment Complete"
 echo -e "  ${GREEN}${BOLD}✓ All services deployed successfully!${NC}"
 echo ""
 echo "  Traffic flow:"
-echo "    Client → akto-cloudflare-proxy → origin server"
-echo "           ↳ async: akto-ingest-guardrails (binding)"
-echo "                    → akto-guardrails-executor (binding) → policy check"
-echo "                      → akto-guardrail-executor (HTTP) → guardrail-executor"
-echo "                    → akto-mini-runtime (binding) → Akto"
+echo "    Client → akto-cloudflare-proxy-cf → origin server"
+echo "           ↳ async: akto-ingest-guardrails-cf (binding)"
+echo "                    → akto-guardrails-service-cf (binding) → policy check"
+echo "                      → akto-guardrail-executor-cf (HTTP) → guardrail-executor"
+echo "                    → akto-mini-runtime-cf (binding) → Akto"
 echo ""
 echo "  Next steps:"
 echo "    1. Verify route is active: dash.cloudflare.com → Workers & Pages → Routes"
@@ -465,11 +465,11 @@ echo "    3. Check Akto Dashboard → API Collections for discovered APIs"
 echo "    4. Check Akto Dashboard → Security Policies for guardrails status"
 echo ""
 echo "  Monitor logs:"
-echo "    npx wrangler tail akto-cloudflare-proxy          --format pretty"
-echo "    npx wrangler tail akto-ingest-guardrails         --format pretty"
-echo "    npx wrangler tail akto-guardrails-executor       --format pretty"
-echo "    npx wrangler tail akto-guardrail-executor               --format pretty"
-echo "    npx wrangler tail akto-mini-runtime              --format pretty"
+echo "    npx wrangler tail akto-cloudflare-proxy-cf          --format pretty"
+echo "    npx wrangler tail akto-ingest-guardrails-cf         --format pretty"
+echo "    npx wrangler tail akto-guardrails-service-cf       --format pretty"
+echo "    npx wrangler tail akto-guardrail-executor-cf               --format pretty"
+echo "    npx wrangler tail akto-mini-runtime-cf              --format pretty"
 echo ""
 echo -e "${GREEN}${BOLD}  Documentation: https://docs.akto.io/traffic-connector/api-gateways/cloudflare${NC}"
 echo ""

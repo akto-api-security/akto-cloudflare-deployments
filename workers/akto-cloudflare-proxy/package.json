@@ -1,5 +1,5 @@
 {
-  "name": "akto-cloudflare-proxy",
+  "name": "akto-cloudflare-proxy-cf",
   "version": "0.0.1",
   "description": "Cloudflare Worker that transparently proxies traffic, sends it to Akto for API discovery, and optionally enforces MCP guardrails",
   "private": true,

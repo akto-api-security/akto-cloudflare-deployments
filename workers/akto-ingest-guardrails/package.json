@@ -1,5 +1,5 @@
 {
-  "name": "akto-ingest-guardrails",
+  "name": "akto-ingest-guardrails-cf",
   "description": "Cloudflare Worker for Akto data ingestion and MCP guardrails",
   "version": "0.0.1",
   "private": true,

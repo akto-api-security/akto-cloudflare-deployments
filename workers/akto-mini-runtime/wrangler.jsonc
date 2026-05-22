@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "akto-mini-runtime",
+	"name": "akto-mini-runtime-cf",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-23",
 	"compatibility_flags": [
@@ -21,8 +21,8 @@
 
 	"containers": [
 		{
-			"name": "akto-mini-runtime-container",
-			"class_name": "AktoMiniRuntimeContainer",
+			"name": "akto-mini-runtime-container-cf",
+			"class_name": "AktoMiniRuntimeContainerCf",
 			"image": "registry.cloudflare.com/YOUR_ACCOUNT_ID/mini-runtime:v1",
 			"instance_type": "standard-2",
 			"max_instances": 3
@@ -32,8 +32,8 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "AktoMiniRuntimeContainer",
-				"name": "AKTO_MINI_RUNTIME_CONTAINER"
+				"class_name": "AktoMiniRuntimeContainerCf",
+				"name": "AKTO_MINI_RUNTIME_CONTAINER_CF"
 			}
 		]
 	},
@@ -41,7 +41,7 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"AktoMiniRuntimeContainer"
+				"AktoMiniRuntimeContainerCf"
 			],
 			"tag": "v1"
 		}

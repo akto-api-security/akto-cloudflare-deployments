@@ -1,5 +1,5 @@
 {
-  "name": "akto-guardrails-executor",
+  "name": "akto-guardrails-executor-cf",
   "version": "0.0.1",
   "description": "Cloudflare Worker for Akto Agent Guardrails Executor service",
   "private": true,

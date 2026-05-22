@@ -24,18 +24,18 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 WORKERS=(
-    "akto-cloudflare-proxy"
-    "akto-ingest-guardrails"
-    "akto-guardrails-executor"
-    "akto-guardrail-executor"
-    "akto-mini-runtime"
+    "akto-cloudflare-proxy-cf"
+    "akto-ingest-guardrails-cf"
+    "akto-guardrails-service-cf"
+    "akto-guardrail-executor-cf"
+    "akto-mini-runtime-cf"
 )
 
 CONTAINER_APPS=(
-    "akto-guardrails-executor-container"
-    "akto-guardrail-executor-container"
-    "akto-mini-runtime-container"
-    "akto-data-ingestion-container"
+    "akto-guardrails-service-container-cf"
+    "akto-guardrail-executor-container-cf"
+    "akto-mini-runtime-container-cf"
+    "akto-data-ingestion-container-cf"
 )
 
 header "Akto × Cloudflare — Cleanup"

@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "akto-guardrails-executor",
+	"name": "akto-guardrails-service-cf",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-06-23",
 	"compatibility_flags": [
@@ -22,8 +22,8 @@
 
 	"containers": [
 		{
-			"name": "akto-guardrails-executor-container",
-			"class_name": "AktoGuardrailsExecutorContainer",
+			"name": "akto-guardrails-service-container-cf",
+			"class_name": "AktoGuardrailsServiceContainerCf",
 			"image": "registry.cloudflare.com/YOUR_ACCOUNT_ID/guardrails-service:v1",
 			"instance_type": "standard-2",
 			"max_instances": 5
@@ -33,8 +33,8 @@
 	"durable_objects": {
 		"bindings": [
 			{
-				"class_name": "AktoGuardrailsExecutorContainer",
-				"name": "AKTO_GUARDRAILS_EXECUTOR_CONTAINER"
+				"class_name": "AktoGuardrailsServiceContainerCf",
+				"name": "AKTO_GUARDRAILS_SERVICE_CONTAINER_CF"
 			}
 		]
 	},
@@ -42,7 +42,7 @@
 	"migrations": [
 		{
 			"new_sqlite_classes": [
-				"AktoGuardrailsExecutorContainer"
+				"AktoGuardrailsServiceContainerCf"
 			],
 			"tag": "v1"
 		}

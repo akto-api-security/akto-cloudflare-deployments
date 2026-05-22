@@ -1,7 +1,7 @@
 import { Container } from "@cloudflare/containers";
 
 type Environment = {
-  readonly AKTO_MINI_RUNTIME_CONTAINER: DurableObjectNamespace<AktoMiniRuntimeContainer>;
+  readonly AKTO_MINI_RUNTIME_CONTAINER_CF: DurableObjectNamespace<AktoMiniRuntimeContainerCf>;
   readonly DATABASE_ABSTRACTOR_SERVICE_URL: string;
   readonly DATABASE_ABSTRACTOR_SERVICE_TOKEN: string;
   readonly AKTO_INSTANCE_TYPE?: string;
@@ -9,7 +9,7 @@ type Environment = {
   readonly MINI_RUNTIME_NAME?: string;
 };
 
-export class AktoMiniRuntimeContainer extends Container {
+export class AktoMiniRuntimeContainerCf extends Container {
   defaultPort = 8001;
   sleepAfter = "2h";
 
@@ -55,8 +55,8 @@ export class AktoMiniRuntimeContainer extends Container {
 export default {
   async fetch(request: Request, env: Environment, ctx: ExecutionContext): Promise<Response> {
     try {
-      const containerId = env.AKTO_MINI_RUNTIME_CONTAINER.idFromName("main");
-      const container = env.AKTO_MINI_RUNTIME_CONTAINER.get(containerId);
+      const containerId = env.AKTO_MINI_RUNTIME_CONTAINER_CF.idFromName("main");
+      const container = env.AKTO_MINI_RUNTIME_CONTAINER_CF.get(containerId);
       return await container.fetch(request);
     } catch (error) {
       console.error("[Mini-Runtime] Error:", error);
