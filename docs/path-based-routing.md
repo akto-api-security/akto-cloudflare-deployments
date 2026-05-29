@@ -59,13 +59,33 @@ Cloudflare only routes requests matching the route rule to the proxy worker. Req
 
 ## Option B — Full new installation
 
-If neither server changes nor path rewriting are feasible, deploy a completely separate Akto instance:
+If modifying the existing MCP server is not feasible, you have two approaches:
+
+**B1. Deploy or duplicate your existing MCP service**
+
+Run a second instance of your MCP server (a copy or a duplicate deployment) on a new subdomain or URL. This instance serves only the teams that need Akto monitoring, while the original shared instance remains unchanged.
+
+Point Akto at the new instance by setting `ROUTE_PATTERN` to its URL:
+
+```bash
+ROUTE_PATTERN=akto-mcp.yourdomain.com/*
+```
+
+MCP clients that should be monitored connect to `akto-mcp.yourdomain.com`; everyone else continues using the original shared URL.
+
+---
+
+**B2. Fresh Akto installation on a new subdomain**
+
+Deploy a completely separate Akto instance:
 
 1. Follow the standard [deployment instructions](../README.md).
-2. Use a `ROUTE_PATTERN` that matches only the traffic you want Akto to see — for example, a subdomain you control:
+2. Use a `ROUTE_PATTERN` that matches only the traffic you want Akto to see:
    ```bash
    ROUTE_PATTERN=akto-mcp.yourdomain.com/*
    ```
 3. Configure your MCP clients to point at the new subdomain instead of the shared URL.
 
-This approach gives full isolation: the Akto-monitored endpoint is a separate Cloudflare worker with its own route, completely independent of the shared MCP server.
+---
+
+Both B1 and B2 give full isolation — the Akto-monitored endpoint is independent of the shared MCP server, and zero changes are needed on the original service.
